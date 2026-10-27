@@ -1,41 +1,37 @@
 # Device Radar
 
-Windows 外设识别与系统昵称管理工具，目前为设计与 TUI 样稿阶段。
+免费、开源、MIT 许可的 Windows 外设识别与系统昵称管理 TUI。解压到可写文件夹，运行 `DeviceRadar.exe`；完成后退出，无驻留服务或计划任务。自包含 win-x64 程序无需安装 .NET。
 
-样稿由 Terminal.Gui 2.5.0 的正式控件绘制，浅色蓝选中行、独立改名对话框、修改预览、部分完成结果及窄屏布局均使用示例数据。
+首版提供真实设备清单、设备变化通知、外接/内置/虚拟/离线筛选、搜索、功能聚合、拔插查找实物、USB/PCI 公开 ID 补全、中英文、逐位置编辑、预览、不可变恢复点、独立回读和历史版本恢复。浅色背景、蓝色选中行，最低正常交互尺寸 80×24；窄屏上下分栏，缩放保留输入和选择。
 
-另有独立原生探针，用于已确认的鼠标、BLE 键盘与 USB 麦克风的可恢复定点命名实验。
+**系统改名为部分支持。** 已验证的写入后端限定 Windows 11 build 22631 的指定 Logitech 接收器鼠标 PnP 与 AB13X 录音端点，并要求匹配本机验证配置的精确身份与系统/驱动指纹。发布包不含私有配置；其他机器可枚举、识别、查看能力与打开 Windows 设置。未经验证的设备、Classic 蓝牙、BLE、播放端点显示具体不可用原因，不自动尝试实验路径。详见[支持矩阵](docs/SUPPORT.md)和[本轮验收](docs/ACCEPTANCE.md)。
 
-AB13X 麦克风已跑通普通权限原生改名、名称同步、声音设置刷新和恢复，提供自包含单文件实验程序；设备、系统版本与生命周期的实际验收范围见[实测记录](docs/BLUETOOTH-AUDIO-LAB.md)。
+Windows 10 22H2 为兼容目标，尚未实测。本轮不重启电脑、蓝牙服务或适配器；历史重启证据仅适用于原设备与原后端。
 
-VGN 蓝牙键盘已通过驱动代码分析、重连写入跟踪和只读驱动查询定位名称覆盖来源；运行时名称同步修复尚未实现，详见[根因报告](docs/BLE-ROOT-CAUSE.md)。探针限定已实测的设备和系统版本。
+使用：
 
-- [产品设计](DESIGN.md)
-- [真实设备识别与改名流程](docs/DEVICE-FLOW.md)
-- [名称持久性研究与验证计划](docs/NAME-PERSISTENCE.md)
-- [原生命名探针](prototypes/DeviceRadar.NativeProbe/README.md)与[当前鼠标实测记录](docs/MOUSE-PERSISTENCE-LAB.md)
-- [蓝牙键盘与 USB 麦克风实测](docs/BLUETOOTH-AUDIO-LAB.md)
-- [BLE 名称覆盖根因](docs/BLE-ROOT-CAUSE.md)
-- [TUI 方案、运行与渲染](docs/TUI-PREVIEW.md)
+1. 解压完整发布包，在可写目录运行 EXE。默认按系统语言；F2 切换中文/English。
+2. 搜索或选择设备，Enter 查看全部命名位置；Tab、方向键、鼠标均可操作。F5 重新枚举。
+3. 改名窗口中逐项填写，检查预览再确认。需要管理员权限的 PnP 操作，可从主界面选择“管理员重开”。录音路径使用普通权限。
+4. 查看各位置的 API、回读与同步结果；需要时打开对应 Windows 设置。声音页面缓存旧名时，可单独确认“刷新声音设置”，关闭并重新打开设置。
+5. “历史/恢复”列出当前连接的本机记录。确认实物，选择版本并预览后恢复；弱身份不会自动应用历史。结束后退出。
 
-安装 .NET 10 SDK 后，在项目根目录运行：
+工具目录的 `data/v1/<电脑指纹>/` 保存设置、验证配置、恢复点、意图和结果；`cache/identification/` 保存显式更新的公开数据库。备份或移动工具时一起保存 `data`。原始属性是否存在、类型与字节均保留；删除记录会失去相应恢复能力。损坏或未提交的文件不会作为有效恢复点。不要同时使用其他改名工具。
 
-```powershell
-.\run-preview.ps1
-```
+启动及枚举无需联网。内置 USB/PCI 数据库支持离线；显式更新只下载固定地址的完整公开数据库。序列号、蓝牙地址、完整实例路径、电脑标识及改名记录留在本机。
 
-生成 ANSI 字符网格样稿：
+开发需要 .NET 10 SDK 10.0.100 起；脚本优先使用项目 `.tools/dotnet`：
 
 ```powershell
-.\render-preview.ps1
+.\build.ps1
+.\run.ps1
+.\run.ps1 --self-check
+.\build.ps1 -Action publish
+.\build.ps1 -Action package
 ```
 
-打开浏览器查看器需要 Node.js：
+发布位置：`artifacts/release/v0.1.0-win-x64/`，旁边有 ZIP 和 SHA-256 校验文件。完整命令及构建约束见[构建说明](docs/BUILD.md)。开发诊断 CLI 可用 `DeviceRadar.exe inventory`、`capabilities --device <token>`、`history --device <token>`；无参数显示真实 TUI。
 
-```powershell
-cd tools\tui-renderer
-npm ci
-npm start
-```
+[产品设计](DESIGN.md) · [设备流程](docs/DEVICE-FLOW.md) · [识别来源与许可](docs/IDENTIFICATION-SOURCES.md) · [命名研究](docs/NAMING-RESEARCH.md) · [第三方声明](THIRD-PARTY-NOTICES.md) · [可续接进度](docs/IMPLEMENTATION-PROGRESS.md)
 
-查看器地址为 [http://127.0.0.1:4178](http://127.0.0.1:4178)。画面由 xterm.js 直接解释框架导出的 ANSI；交互操作在原生 TUI 样稿中进行。
+`prototypes/DeviceRadar.Preview` 为明确隔离的示例数据开发样稿；`prototypes/DeviceRadar.NativeProbe` 保留历史定点实验。生产入口仅 `src/DeviceRadar`。本机 `artifacts/device-lab` 含未分发的原始取证、封存校验值及旧恢复点，克隆仓库不包含这些资料，旧格式继续按原探针约束使用。
