@@ -1,0 +1,21 @@
+:root { color-scheme: light; font: 15px/1.5 system-ui, sans-serif; color: #222936; background: #edf0f4; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 22px 28px; background: white; border-bottom: 1px solid #d5dbe4; flex-wrap: wrap; }
+h1 { font-size: 20px; margin: 0; font-weight: 650; }
+h1 span { color: #687586; font-size: 15px; margin-left: 12px; font-weight: 400; }
+header p { margin: 4px 0 0; color: #657082; font-size: 12px; }
+nav { display: flex; flex-wrap: wrap; gap: 5px; }
+nav a { color: #42536b; text-decoration: none; padding: 6px 12px; border: 1px solid transparent; border-radius: 3px; }
+nav a[aria-current="page"] { color: #045cc5; background: #e8f1ff; border-color: #c3d9f8; }
+nav a:hover { background: #f0f3f7; }
+main { padding: 23px 28px 30px; width: max-content; min-width: 100%; }
+.caption { display: flex; align-items: baseline; gap: 16px; margin-bottom: 10px; }
+.caption strong { font-weight: 600; }
+.caption span { color: #738094; font-size: 12px; }
+#terminal-host { padding: 10px; width: max-content; background: #ffffff; border: 1px solid #c7ced8; }
+.xterm { padding: 0; }
+.xterm .xterm-viewport { overflow: hidden !important; }
+.note { color: #687586; font-size: 12px; margin: 14px 0 6px; }
+code { color: #42536b; font: 12px Consolas, monospace; }
+#error { color: #a02121; }

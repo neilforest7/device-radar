@@ -1,0 +1,52 @@
+{
+  "snapshots": [
+    {
+      "state": "main",
+      "title": "\u4E3B\u754C\u9762 \u00B7 \u5BBD\u5C4F",
+      "cols": 144,
+      "rows": 24,
+      "file": "main.ansi",
+      "textFile": "main.txt"
+    },
+    {
+      "state": "rename",
+      "title": "\u6539\u540D\u5BF9\u8BDD\u6846 \u00B7 \u5BBD\u5C4F",
+      "cols": 144,
+      "rows": 24,
+      "file": "rename.ansi",
+      "textFile": "rename.txt"
+    },
+    {
+      "state": "preview",
+      "title": "\u4FEE\u6539\u9884\u89C8 \u00B7 \u5BBD\u5C4F",
+      "cols": 144,
+      "rows": 24,
+      "file": "preview.ansi",
+      "textFile": "preview.txt"
+    },
+    {
+      "state": "result",
+      "title": "\u90E8\u5206\u5B8C\u6210\u7ED3\u679C \u00B7 \u5BBD\u5C4F",
+      "cols": 144,
+      "rows": 24,
+      "file": "result.ansi",
+      "textFile": "result.txt"
+    },
+    {
+      "state": "narrow",
+      "title": "\u4E3B\u754C\u9762 \u00B7 80\u00D724",
+      "cols": 80,
+      "rows": 24,
+      "file": "narrow.ansi",
+      "textFile": "narrow.txt"
+    },
+    {
+      "state": "narrow-rename",
+      "title": "\u6539\u540D\u5BF9\u8BDD\u6846 \u00B7 80\u00D724",
+      "cols": 80,
+      "rows": 24,
+      "file": "narrow-rename.ansi",
+      "textFile": "narrow-rename.txt"
+    }
+  ]
+}

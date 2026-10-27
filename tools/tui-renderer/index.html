@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Device Radar · TUI 渲染样稿</title>
+  <link rel="stylesheet" href="/vendor/xterm.css">
+  <link rel="stylesheet" href="/viewer.css">
+  <script src="/vendor/xterm.js" defer></script>
+  <script src="/viewer.js" defer></script>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Device Radar <span>TUI 渲染样稿</span></h1>
+      <p>Terminal.Gui 正式控件 → ANSI 字符网格 → xterm.js</p>
+    </div>
+    <nav aria-label="样稿状态" id="states"></nav>
+  </header>
+  <main>
+    <div class="caption"><strong id="state-title">加载中</strong><span id="dimensions"></span></div>
+    <div id="terminal-host" aria-label="真实终端字符网格"></div>
+    <p class="note">这里展示框架实际渲染的示例数据。使用下方运行命令可在终端中操作独立对话框。</p>
+    <code>run-preview.ps1</code>
+    <p id="error" role="alert" hidden></p>
+  </main>
+</body>
+</html>

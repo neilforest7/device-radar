@@ -1,0 +1,12 @@
+{
+  "name": "device-radar-tui-renderer",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "@xterm/xterm": "6.0.0"
+  }
+}
