@@ -1,5 +1,7 @@
 # TUI 样稿检查
 
+2026-10-28：本页以下为示例样稿的历史检查记录。真实产品的当前验收见 [ACCEPTANCE](docs/ACCEPTANCE.md)，入口为 `src/DeviceRadar`。未将样稿检查计入真实系统写入或生命周期验收。
+
 final result: passed
 
 范围：选定浅色、蓝色选中行方向，转换为正式 TUI 字符网格。本轮减少空行，改名对话框在所有尺寸下保持逐项展开。

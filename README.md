@@ -1,41 +1,33 @@
 # Device Radar
 
-Windows 外设识别与系统昵称管理工具，目前为设计与 TUI 样稿阶段。
+免费、开源的 Windows 外设识别与改名工具。免安装，可离线使用，支持中英文。
 
-样稿由 Terminal.Gui 2.5.0 的正式控件绘制，浅色蓝选中行、独立改名对话框、修改预览、部分完成结果及窄屏布局均使用示例数据。
+## 使用
 
-另有独立原生探针，用于已确认的鼠标、BLE 键盘与 USB 麦克风的可恢复定点命名实验。
+1. 解压便携包到可写文件夹，运行 `DeviceRadar.exe`。
+2. 找到设备，选择“改名”，逐项填写名称，预览后确认写入。
+3. 需要恢复时，打开“历史/恢复”，选择之前保存的版本。
 
-AB13X 麦克风已跑通普通权限原生改名、名称同步、声音设置刷新和恢复，提供自包含单文件实验程序；设备、系统版本与生命周期的实际验收范围见[实测记录](docs/BLUETOOTH-AUDIO-LAB.md)。
+`F2` 切换语言，`F5` 刷新设备，`Esc` 返回或退出。支持鼠标、方向键和 `Tab`，窗口至少为 80×24。
 
-VGN 蓝牙键盘已通过驱动代码分析、重连写入跟踪和只读驱动查询定位名称覆盖来源；运行时名称同步修复尚未实现，详见[根因报告](docs/BLE-ROOT-CAUSE.md)。探针限定已实测的设备和系统版本。
+需要管理员权限时，从主界面选择“管理员重开”。备份或移动程序时，一起保留旁边的 `data` 文件夹，其中保存着恢复记录。
 
-- [产品设计](DESIGN.md)
-- [真实设备识别与改名流程](docs/DEVICE-FLOW.md)
-- [名称持久性研究与验证计划](docs/NAME-PERSISTENCE.md)
-- [原生命名探针](prototypes/DeviceRadar.NativeProbe/README.md)与[当前鼠标实测记录](docs/MOUSE-PERSISTENCE-LAB.md)
-- [蓝牙键盘与 USB 麦克风实测](docs/BLUETOOTH-AUDIO-LAB.md)
-- [BLE 名称覆盖根因](docs/BLE-ROOT-CAUSE.md)
-- [TUI 方案、运行与渲染](docs/TUI-PREVIEW.md)
+## 支持范围
+
+当前在 Windows 11 x64 上验证，Windows 10 22H2 待实测。公开包默认只读，系统改名需匹配本机验证配置；可修改的位置会在界面标明，详见[支持矩阵](docs/SUPPORT.md)。
+
+## 开发
 
 安装 .NET 10 SDK 后，在项目根目录运行：
 
 ```powershell
-.\run-preview.ps1
+.\run.ps1
 ```
 
-生成 ANSI 字符网格样稿：
+生成自包含便携包：
 
 ```powershell
-.\render-preview.ps1
+.\build.ps1 -Action publish
 ```
 
-打开浏览器查看器需要 Node.js：
-
-```powershell
-cd tools\tui-renderer
-npm ci
-npm start
-```
-
-查看器地址为 [http://127.0.0.1:4178](http://127.0.0.1:4178)。画面由 xterm.js 直接解释框架导出的 ANSI；交互操作在原生 TUI 样稿中进行。
+[构建说明](docs/BUILD.md) · [验收记录](docs/ACCEPTANCE.md) · [MIT 许可证](LICENSE) · [第三方声明](THIRD-PARTY-NOTICES.md)

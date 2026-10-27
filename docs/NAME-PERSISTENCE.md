@@ -1,5 +1,7 @@
 # 名称持久性：核心技术挑战
 
+2026-10-28 更新：VGN 的原名运行时同步恢复已通过本机限定实验及一次正常重连，详见 [BLE-CURRENT-RECOVERY](BLE-CURRENT-RECOVERY.md)。下述未修复状态属于原历史；完整 BLE 改名往返与新路径重启仍未验证。首版真实产品的能力和检查见 [SUPPORT](SUPPORT.md)、[ACCEPTANCE](ACCEPTANCE.md)。
+
 状态：鼠标已完成原生改名、退出、同口拔插、电脑重启及恢复实验，见 [实测记录](MOUSE-PERSISTENCE-LAB.md)。AB13X 麦克风已复现工具层的原生名称更新、系统通知、设置刷新及恢复；其存储生命周期与新版后端验收分别记录。VGN BLE 已定位到 BTHPORT 运行时别名与磁盘值不同步，重连由微软 BLE 枚举驱动回写 PnP；运行时同步修复仍待验证。产品目标仍为 Windows 10 22H2 起、Windows 11、x64，单次修改后退出，名称在目标 Windows 界面持续生效。
 
 ## 产品要求与判定

@@ -1,5 +1,7 @@
 # VGN 键盘联合改名实验
 
+本页为 2026-10-27 联合实验历史；其残留在 2026-10-28 经 [限定运行时恢复](BLE-CURRENT-RECOVERY.md)收尾，正常重连后的独立读取与真实列表均为原名。下述检查点及重启建议不代表本轮仍有残留，继续操作须先读取当前状态。
+
 最新进度：已在不重启电脑的情况下完成[根因调查](BLE-ROOT-CAUSE.md)。真实重连的 ETW 栈确认微软 BLE 枚举驱动根据运行时名称回写 PnP；BTHPORT 内存别名未随直接注册表恢复而同步。运行时同步修复尚未执行，后续不把“再重启一次”当作已确认的恢复方法。
 
 2026-10-27，Windows 11 x64 build 22631。目标为 VGN N75 PRO-1。复现 [BluFang 的字段组合](https://github.com/VAROIndustries/BluFang/blob/83ce7d0aab607fc0fad723a1ca518a95d755be6e/BluFang.ps1)：先写该设备 BTHPORT 缓存的 FriendlyName，再写同一 BTHLE 根节点的 PnP FriendlyName。使用现有受守卫探针；没有运行第三方脚本，没有改变注册表权限。
