@@ -2,7 +2,9 @@
 
 Windows 外设识别与系统昵称管理。MIT、免费、开源、纯便携；自包含 Windows x64 程序，不需要安装 .NET。
 
-解压完整包到可写文件夹，运行 `DeviceRadar.exe`。Tab 切换焦点、方向键选择、Enter 确认、鼠标操作、F2 中文/English、F5 重新枚举、Esc 返回或退出。80×24 起正常交互，窄屏上下分栏。
+解压完整包到可写文件夹，运行 `DeviceRadar.exe`。Tab / Shift+Tab 切换设备列表与详情，方向键选择，Enter 确认，/ 搜索，F6 中文/English，F5 刷新，Esc 返回或退出。列表顶部按 ↑ 进入筛选、← → 选择、空格切换；详情 PgUp/PgDn 滚动。80×24 起正常交互，窄屏上下分栏。
+
+F3 全局查找实物：断开再重连目标设备，弹窗显示设备名后按 Enter 在列表中选中；Esc 取消。F4 管理员重开，F7 系统设置。
 
 选择设备后可搜索、筛选、查找实物、查看命名位置和具体能力。可用位置支持逐项编辑、预览、保存恢复点、写入、独立回读与历史版本恢复。修改完成后退出即可。
 
@@ -18,4 +20,4 @@ PnP 写入需要管理员，可从主界面选择管理员重开；录音路径�
 
 Source and reproducible build instructions: [neilforest7/device-radar](https://github.com/neilforest7/device-radar)。
 
-English: extract to a writable folder and run DeviceRadar.exe. F2 switches language. Review each naming location, preview, then apply. History restoration creates a fresh recovery point. Only locally validated exact devices can be written; the public archive contains no private validation profiles. Windows 10 and reboot validation remain pending. Keep the private data folder with the executable when backing up.
+English: extract to a writable folder and run DeviceRadar.exe. Tab switches panes, / searches, F6 switches language, F3 locates a device after disconnect/reconnect, F4 restarts as administrator, and F7 opens settings. Review each naming location, preview, then apply. History restoration creates a fresh recovery point. Only locally validated exact devices can be written; the public archive contains no private validation profiles. Windows 10 and reboot validation remain pending. Keep the private data folder with the executable when backing up.

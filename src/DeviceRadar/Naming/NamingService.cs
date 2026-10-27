@@ -43,6 +43,7 @@ public sealed partial class NamingService
             var snapshot = Select(live, location);
             MatchSelection(device, location, snapshot);
             Store.RequireValidation(kind, snapshot.Identity);
+            if (kind == Targets.Mouse && !Runtime.IsAdministrator) return Blocked("administrator-required");
             return new(location, true, "validated-device-and-build", DisplayEditable(kind, snapshot), settings,
                 kind == Targets.Mouse, Evidence(location.Kind));
         }
@@ -156,12 +157,13 @@ public sealed partial class NamingService
 
     // Read the immutable history once; matching against the current inventory is done by the caller.
     // This path performs no native device observation and never changes a record.
-    public IReadOnlyList<HistoryEntry> NicknameHistory()
+    public IReadOnlyList<HistoryEntry> StoredHistory()
         => Store.History()
-            .Where(item => item.Record is { Purpose: "rename" } && item.Status is "applied" or "restored" or "already-at-value" or "verified")
-            .Select(item => new HistoryEntry(item.Token, item.Record!.CreatedAtUtc, LocationId(item.Record),
-                item.Record.OriginalResolvedName, item.Record.ProposedName + Targets.ResolvedSuffix(item.Record),
-                item.Status, item.Reason))
+            .Select(item => item.Record is { } record
+                ? new HistoryEntry(item.Token, record.CreatedAtUtc, LocationId(record),
+                    record.OriginalResolvedName, record.ProposedName + Targets.ResolvedSuffix(record),
+                    item.Status, item.Reason, record.Purpose != "restore")
+                : new HistoryEntry(item.Token, default, "", "", "", item.Status, item.Reason))
             .ToArray();
 
     public SoundSettingsResult RefreshSoundSettings(bool confirmClose = true)

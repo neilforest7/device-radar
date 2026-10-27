@@ -18,9 +18,10 @@ from winpty import PtyProcess
 from winpty.enums import Backend
 
 KEYS = {
-    "tab": "\t", "enter": "\r", "escape": "\x1b", "backspace": "\x7f",
+    "tab": "\t", "shift-tab": "\x1b[Z", "enter": "\r", "escape": "\x1b", "backspace": "\x7f", "/": "/",
     "up": "\x1b[A", "down": "\x1b[B", "left": "\x1b[D", "right": "\x1b[C",
-    "f2": "\x1bOQ", "f5": "\x1b[15~", "home": "\x1b[H", "end": "\x1b[F",
+    "f3": "\x1b[13~", "f4": "\x1b[14~", "f5": "\x1b[15~", "f6": "\x1b[17~", "f7": "\x1b[18~",
+    "home": "\x1b[H", "end": "\x1b[F",
 }
 
 
