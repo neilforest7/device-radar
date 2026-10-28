@@ -2,68 +2,56 @@ namespace DeviceRadar.Naming.Native;
 
 internal sealed class AudioTarget : TargetSession
 {
-    public const string VidPid = "001F:0B21";
-    internal const string FriendlyNameValue = "{a45c254e-df1c-4efd-8020-67d146a850e0},14";
-    internal const string DescriptionValue = "{a45c254e-df1c-4efd-8020-67d146a850e0},2";
-    private const string UsbPrefix = @"USB\VID_001F&PID_0B21";
-    private const string CapturePrefix = @"SWD\MMDEVAPI\{0.0.1.00000000}.";
-    private readonly DeviceCatalog catalog = new();
+    private readonly DeviceCatalog catalog;
+    private readonly string endpointId;
+    private readonly int flow;
     public override IReadOnlyList<DeviceSnapshot> Candidates { get; }
-    private readonly Dictionary<string, string> propertyPaths = new(StringComparer.OrdinalIgnoreCase);
 
-    public AudioTarget(DeviceIdentity? bound)
+    public AudioTarget(string endpointId, int flow, DeviceIdentity? bound = null)
     {
+        if (!Runtime.IsSupportedWindows) throw new ProbeException("audio-platform-unsupported");
+        this.endpointId = endpointId;
+        this.flow = flow;
+        var endpoint = CoreAudio.Open(endpointId, flow);
+        catalog = new DeviceCatalog();
         try
         {
-            var audio = CoreAudio.ActiveCaptures();
-            var candidates = new List<DeviceSnapshot>();
-            foreach (var node in catalog.Nodes.Where(node => node.ClassGuid == Targets.AudioEndpointClass
-                && node.InstanceId.StartsWith(CapturePrefix, StringComparison.OrdinalIgnoreCase)))
-            {
-                var media = catalog.Parent(node);
-                var usb = media is null ? null : catalog.Parent(media);
-                if (media is null || usb is null || media.ClassGuid != Targets.MediaClass || usb.ClassGuid != Targets.UsbClass) continue;
-                var mediaId = media.Identity();
-                var usbId = usb.Identity();
-                if (!mediaId.HardwareIds.Any(IsUsbId) || !usbId.HardwareIds.Any(IsUsbId)) continue;
-                if (Format.Text(media.Read(Native.Service)) != "usbaudio" || Format.Text(usb.Read(Native.Service)) != "usbccgp") continue;
-                var identity = node.Identity([Ancestor(mediaId), Ancestor(usbId)]);
-                ValidateBinding(identity);
-                if (bound is not null && !string.Equals(identity.InstanceId, bound.InstanceId, StringComparison.Ordinal)) continue;
-                var endpointId = identity.InstanceId[@"SWD\MMDEVAPI\".Length..];
-                var resolved = audio.Where(item => string.Equals(item.Id, endpointId, StringComparison.OrdinalIgnoreCase)).ToArray();
-                if (resolved.Length != 1) continue;
-                if (!string.Equals(resolved[0].ContainerId, identity.ContainerId, StringComparison.OrdinalIgnoreCase))
-                    throw new ProbeException("audio-container-mismatch");
-                if (!resolved[0].DefaultForAllRoles) throw new ProbeException("audio-default-role-changed");
-                var path = PropertiesPath(identity);
-                using var properties = NativeRegistry.OpenExisting(path);
-                var raw = NativeRegistry.Read(properties, DescriptionValue);
-                Safety.ValidateAudioValue(raw);
-                var suffix = " (" + resolved[0].InterfaceName + ")";
-                var sources = new AudioNameSources(resolved[0].Description, resolved[0].InterfaceName,
-                    ReadName(node, Native.DeviceDescription), ReadName(node, Native.FriendlyName), ReadName(node, Native.Name));
-                candidates.Add(new(identity, raw, resolved[0].Name, suffix, sources));
-                propertyPaths.Add(identity.InstanceId, path);
-            }
-            Candidates = candidates;
+            var matches = catalog.Nodes.Where(n => string.Equals(n.InstanceId, endpoint.PnpInstanceId, StringComparison.OrdinalIgnoreCase)).ToArray();
+            if (matches.Length != 1) throw new ProbeException(matches.Length == 0 ? "audio-pnp-binding-unavailable" : "audio-pnp-binding-ambiguous");
+            var node = matches[0];
+            var identity = node.Identity() with { EndpointId = endpoint.Id, EndpointContainerId = endpoint.ContainerId };
+            ValidateBinding(identity);
+            if (bound is not null && (!string.Equals(bound.InstanceId, identity.InstanceId, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(bound.EndpointId, identity.EndpointId, StringComparison.Ordinal)
+                || !string.Equals(bound.EndpointContainerId, identity.EndpointContainerId, StringComparison.OrdinalIgnoreCase)))
+                throw new ProbeException("audio-binding-changed");
+            var policyValue = AudioPolicy.ReadDescription(endpoint.Id);
+            if (!endpoint.Description.Same(policyValue)) throw new ProbeException("audio-description-read-mismatch");
+            // The policy ABI does not establish lossless deletion of a previously absent value.
+            if (!policyValue.Exists) throw new ProbeException("audio-policy-missing-description-not-restorable");
+            var sources = new AudioNameSources(Format.Text(endpoint.Description, Format.RegistryString)!, endpoint.InterfaceName,
+                ReadName(node, Native.DeviceDescription), ReadName(node, Native.FriendlyName), ReadName(node, Native.Name));
+            var suffix = ResolvedSuffix(endpoint.Name, Format.Text(endpoint.Description, Format.RegistryString)!);
+            Candidates = [new(identity, policyValue, endpoint.Name, suffix, sources)];
         }
         catch { catalog.Dispose(); throw; }
     }
 
     internal static void ValidateBinding(DeviceIdentity identity)
     {
-        if (identity.ClassGuid != Targets.AudioEndpointClass || identity.ContainerId is null || identity.HardwareIds.Length == 0
-            || identity.Ancestors.Length != 2 || identity.Ancestors[0].ClassGuid != Targets.MediaClass
-            || identity.Ancestors[1].ClassGuid != Targets.UsbClass
-            || !identity.Ancestors.All(parent => IsUsbId(parent.InstanceId) && parent.HardwareIds.Any(IsUsbId)
-                && string.Equals(parent.ContainerId, identity.ContainerId, StringComparison.OrdinalIgnoreCase)))
+        if (identity.ClassGuid == Guid.Empty || identity.InstanceId is not { Length: > 0 and <= 4096 }
+            || identity.InstanceId.Any(char.IsControl) || identity.EndpointId is not { Length: > 0 and <= 4096 }
+            || identity.EndpointId.Any(char.IsControl) || identity.HardwareIds is null || identity.Ancestors is null
+            || !Guid.TryParseExact(identity.EndpointContainerId, "D", out var container) || container == Guid.Empty)
             throw new ProbeException("invalid-record-target");
-        _ = PropertiesPath(identity);
     }
 
-    private static DeviceAncestor Ancestor(DeviceIdentity identity)
-        => new(identity.InstanceId, identity.ClassGuid, identity.HardwareIds, identity.ContainerId);
+    internal static string ResolvedSuffix(string name, string description)
+    {
+        if (!name.StartsWith(description, StringComparison.Ordinal)) throw new ProbeException("audio-name-format-unsupported");
+        return name[description.Length..];
+    }
+
     private static string? ReadName(DeviceNode node, Native.PropertyKey property)
     {
         var value = Format.Text(node.Read(property));
@@ -71,32 +59,25 @@ internal sealed class AudioTarget : TargetSession
             throw new ProbeException("invalid-audio-name-source");
         return value;
     }
-    private static bool IsUsbId(string value) => value.StartsWith(UsbPrefix, StringComparison.OrdinalIgnoreCase)
-        && (value.Length == UsbPrefix.Length || value[UsbPrefix.Length] is '&' or '\\');
-    private static string PropertiesPath(DeviceIdentity identity)
-    {
-        if (!identity.InstanceId.StartsWith(CapturePrefix, StringComparison.OrdinalIgnoreCase)
-            || !Guid.TryParseExact(identity.InstanceId[CapturePrefix.Length..], "B", out var guid) || guid == Guid.Empty)
-            throw new ProbeException("invalid-capture-endpoint-id");
-        return @"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture\" + guid.ToString("B") + @"\Properties";
-    }
-
-    public AudioPropertiesSnapshot CaptureProperties(string machine)
-    {
-        var target = Unique();
-        using var properties = NativeRegistry.OpenExisting(propertyPaths[target.Identity.InstanceId]);
-        return new(Format.Version, Guid.NewGuid().ToString("N"), machine, DateTimeOffset.UtcNow,
-            Runtime.SystemDescription, target.Identity, target.SystemName, NativeRegistry.Snapshot(properties));
-    }
 
     public override TargetWriteLease OpenWriter(RawValue value)
     {
-        if (Runtime.WindowsVersion.Build != 22631) throw new ProbeException("experimental-build-unsupported");
-        Safety.ValidateAudioValue(value);
         var before = Unique();
-        using var properties = NativeRegistry.OpenExisting(propertyPaths[before.Identity.InstanceId]);
-        if (!NativeRegistry.Read(properties, DescriptionValue).Same(before.FriendlyName)) throw new ProbeException("value-changed-before-write");
-        var endpointId = before.Identity.InstanceId[@"SWD\MMDEVAPI\".Length..];
+        if (!value.Exists || value.Type != Format.RegistryString)
+            throw new ProbeException("audio-policy-missing-description-not-restorable");
+        _ = Format.Text(value, Format.RegistryString);
+        var current = CoreAudio.Open(endpointId, flow);
+        using var currentCatalog = new DeviceCatalog();
+        var matches = currentCatalog.Nodes.Where(n => string.Equals(n.InstanceId, current.PnpInstanceId, StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (matches.Length != 1) throw new ProbeException(matches.Length == 0 ? "audio-pnp-binding-unavailable" : "audio-pnp-binding-ambiguous");
+        var currentIdentity = matches[0].Identity() with { EndpointId = current.Id, EndpointContainerId = current.ContainerId };
+        if (!string.Equals(currentIdentity.EndpointContainerId, before.Identity.EndpointContainerId, StringComparison.OrdinalIgnoreCase))
+            throw new ProbeException("audio-endpoint-container-changed");
+        Safety.MatchIdentity(before.Identity, "", "", currentIdentity);
+        if (!string.Equals(current.Id, before.Identity.EndpointId, StringComparison.Ordinal)
+            || !current.Description.Same(before.FriendlyName)
+            || !AudioPolicy.ReadDescription(endpointId).Same(before.FriendlyName))
+            throw new ProbeException("value-changed-before-write");
         return AudioPolicy.OpenWriter(endpointId, before.FriendlyName, value);
     }
     public override void Dispose() => catalog.Dispose();

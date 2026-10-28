@@ -33,15 +33,12 @@ internal sealed class UiText(string language)
     }
     public string Reason(string? reason) => reason is null ? "" : reason switch
     {
-        "administrator-required" => Get("需要管理员权限；请从主界面提权", "Administrator required; elevate from the main screen"),
+        "administrator-required" => Get("需要管理员权限", "Administrator permission required"),
+        "waiting-for-reconnect" => Get("名称已保存，请正常断开后重连设备，再核验", "Name saved. Disconnect and reconnect the device normally, then verify it."),
+        "managed-pnp-target" => Get("该名称由音频或蓝牙命名位置管理", "This name is managed by an audio or Bluetooth naming location"),
         "device-and-location-unverified" => Get("该设备与位置尚未验证", "Device and location are not yet validated"),
         "validated-build-required" => Get("当前 Windows 版本尚未验证", "This Windows build is not validated"),
-        "unverified-device-not-validated" => Get("缺少该实物的本机验证配置；仅可只读使用", "No local validation profile for this physical device; read-only"),
-        "validation-profile-mismatch" or "invalid-validation-profile" => Get("本机验证配置与当前设备或系统不符", "Local validation profile does not match the current device or system"),
-        "validated-driver-changed" => Get("驱动指纹已变化，需要重新验收", "Driver fingerprint changed; validation required"),
-        "ble-reversible-path-unverified" => Get("BLE 可恢复写入尚未验证", "Reversible BLE writing is not validated"),
-        "classic-settings-and-persistence-unverified" => Get("蓝牙设置与持久性尚未验证", "Bluetooth settings and persistence are not validated"),
-        "audio-playback-unverified" => Get("播放端点写入尚未验证", "Playback endpoint writing is not validated"),
+        "ble-next-version" => Get("BLE 改名将在下个版本提供", "BLE rename is planned for the next version"),
         "audio-endpoint-inactive" => Get("声音端点未激活，请核对禁用或连接状态", "Audio endpoint is inactive; check its disabled or connection state"),
         "external-value-changed" => Get("当前名称已被外部修改", "Current name changed externally"),
         "target-offline" => Get("设备已断开", "Device disconnected"),

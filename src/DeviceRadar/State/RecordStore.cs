@@ -191,6 +191,10 @@ internal sealed partial class RecordStore
     public bool HasApplyEvidence(RecordLease lease)
         => ReadEvents(lease).Any(entry => Safety.IsApplyEvidence(entry, lease.Record, lease.Hash));
 
+    public bool HasClassicEmptyAliasIntent(RecordLease lease)
+        => lease.Record.TargetKind == Targets.BluetoothClassic
+            && ReadEvents(lease).Any(entry => Safety.IsClassicEmptyAliasIntent(entry, lease.Record, lease.Hash));
+
     private string EventDirectory(string operationId) => Path.Combine(Root, operationId + ".events");
 
     internal string Resolve(string supplied)

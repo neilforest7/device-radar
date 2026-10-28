@@ -2,7 +2,7 @@ using System.Runtime.InteropServices;
 
 namespace DeviceRadar.Naming.Native;
 
-// Experimental Windows build 22631 path. The modern IPolicyConfig ABI is also used by
+// The modern IPolicyConfig ABI is also used by
 // SoundSwitch (ee7def135e) and AudioDeviceCmdlets (26d08d30e9). It is not a documented API.
 // Only the fixed main-store DeviceDesc property is accessible through this class.
 internal static class AudioPolicy
@@ -16,6 +16,38 @@ internal static class AudioPolicy
         var variant = Marshal.AllocCoTaskMem(VariantSize);
         try { Marshal.Copy(EmptyVariant, 0, variant, VariantSize); return variant; }
         catch { Marshal.FreeCoTaskMem(variant); throw; }
+    }
+
+    // VT_EMPTY cannot be restored losslessly using the supported string write contract.
+    internal static RawValue ReadDescription(string endpointId)
+    {
+        if (!Runtime.IsSupportedWindows) throw new ProbeException("audio-platform-unsupported");
+        IPolicyConfig? policy = null;
+        var key = IntPtr.Zero;
+        var variant = IntPtr.Zero;
+        try
+        {
+            try { policy = (IPolicyConfig)new PolicyConfigClient(); }
+            catch (COMException e) { throw new ProbeException("audio-policy-interface-unavailable", e.HResult); }
+            key = Marshal.AllocCoTaskMem(Marshal.SizeOf<Native.PropertyKey>());
+            Marshal.StructureToPtr(Native.DeviceDescription, key, false);
+            variant = AllocateVariant();
+            var hr = policy.GetPropertyValue(endpointId, false, key, variant);
+            if (hr < 0) throw new ProbeException("audio-policy-read-failed", hr);
+            var type = Marshal.ReadInt16(variant);
+            if (type == 0) return RawValue.Missing();
+            var pointer = Marshal.ReadIntPtr(variant, 8);
+            if (type != WideStringVariant || pointer == IntPtr.Zero) throw new ProbeException("audio-policy-description-type");
+            var text = Marshal.PtrToStringUni(pointer) ?? throw new ProbeException("audio-policy-description-type");
+            if (text.Length > 4095) throw new ProbeException("audio-description-size-limit");
+            return new(true, Format.RegistryString, Format.Unicode.GetBytes(text + "\0"));
+        }
+        finally
+        {
+            if (variant != IntPtr.Zero) { _ = PropVariantClear(variant); Marshal.FreeCoTaskMem(variant); }
+            if (key != IntPtr.Zero) Marshal.FreeCoTaskMem(key);
+            if (policy is not null) Marshal.ReleaseComObject(policy);
+        }
     }
 
     internal static TargetWriteLease OpenWriter(string endpointId, RawValue expected, RawValue desired)
@@ -33,23 +65,25 @@ internal static class AudioPolicy
         private readonly IntPtr key;
         private CoreAudio.NameChangeMonitor? monitor;
         private bool disposed;
+        private readonly CoreAudio.EnvironmentSnapshot environment;
         public int NotificationCount => monitor?.Count ?? 0;
 
         internal PolicyWriteLease(string endpointId, RawValue expected, RawValue desired)
         {
-            if (Runtime.WindowsVersion.Build != 22631 || !Environment.Is64BitProcess)
-                throw new ProbeException("experimental-build-unsupported");
+            if (!Runtime.IsSupportedWindows) throw new ProbeException("audio-platform-unsupported");
             if (!expected.Exists || !desired.Exists)
-                throw new ProbeException("audio-policy-description-required");
+                throw new ProbeException("audio-policy-missing-description-not-restorable");
             this.endpointId = endpointId;
             this.expected = Format.Text(expected, Format.RegistryString) ?? throw new ProbeException("audio-policy-description-required");
             this.desired = Format.Text(desired, Format.RegistryString) ?? throw new ProbeException("audio-policy-description-required");
-            policy = (IPolicyConfig)new PolicyConfigClient();
+            try { policy = (IPolicyConfig)new PolicyConfigClient(); }
+            catch (COMException e) { throw new ProbeException("audio-policy-interface-unavailable", e.HResult); }
             key = Marshal.AllocCoTaskMem(Marshal.SizeOf<Native.PropertyKey>());
             try
             {
                 Marshal.StructureToPtr(Native.DeviceDescription, key, false);
                 CheckCurrent(); // Read the same property through the exact native ABI before any Set.
+                environment = CoreAudio.ObserveEnvironment(endpointId);
                 monitor = CoreAudio.WatchNameChanges(endpointId);
             }
             catch
@@ -85,6 +119,8 @@ internal static class AudioPolicy
         {
             ObjectDisposedException.ThrowIf(disposed, this);
             CheckCurrent();
+            if (!CoreAudio.SameEnvironment(environment, CoreAudio.ObserveEnvironment(endpointId)))
+                throw new ProbeException("audio-state-or-default-changed-before-write");
             var variant = AllocateVariant();
             try
             {
@@ -94,6 +130,8 @@ internal static class AudioPolicy
                 var result = policy.SetPropertyValue(endpointId, false, key, variant);
                 if (result < 0) throw new ProbeException("audio-policy-set-failed", result);
                 _ = SpinWait.SpinUntil(() => NotificationCount > 0, TimeSpan.FromSeconds(1));
+                if (!CoreAudio.SameEnvironment(environment, CoreAudio.ObserveEnvironment(endpointId)))
+                    throw new ProbeException("audio-state-or-default-changed-after-write");
             }
             finally
             {

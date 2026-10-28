@@ -19,11 +19,11 @@ public sealed partial class NamingService
         var root = Path.Combine(temporary, "DeviceRadar-state-check-" + Guid.NewGuid().ToString("N"));
         var machine = new string('a', 64);
         var store = new RecordStore(root, machine);
-        var identity = new NativeIdentity(@"HID\VID_046D&PID_C547&TEST\LOCAL", Format.MouseClass,
-            [@"HID\VID_046D&PID_C547"], "79eae121-7817-4acc-8938-199bfca0f733", []);
+        var identity = new NativeIdentity(@"ROOT\DR_GENERIC_NODE\0000", new Guid("c1e68d1d-0b59-451e-b15e-9744de193efe"),
+            ["DR_GENERIC_NODE"], "79eae121-7817-4acc-8938-199bfca0f733", []);
         var record = new OperationRecord(Format.Version, Guid.NewGuid().ToString("N"), machine,
-            DateTimeOffset.UtcNow, "prepared", "self-check", Targets.Mouse, identity, RawValue.Missing(),
-            "HID-compliant mouse", "Device Radar test", Format.Name("Device Radar test"));
+            DateTimeOffset.UtcNow, "prepared", "self-check", Targets.Pnp, identity, RawValue.Missing(),
+            "Generic device", "Device Radar test", Format.Name("Device Radar test"));
         var junction = Path.Combine(root, "junction");
         var junctionTarget = Path.Combine(root, "junction-target");
         void Check(bool condition)
@@ -40,7 +40,6 @@ public sealed partial class NamingService
         }
         try
         {
-            Refuses(() => store.RequireValidation(Targets.Mouse, identity), "unverified-device-not-validated");
             var token = store.SaveRecoveryPoint(record);
             using (var lease = store.Load(token))
             {

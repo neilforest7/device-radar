@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Text;
 using DeviceRadar.Identification;
 using DeviceRadar.Inventory;
+using ProbeException = DeviceRadar.Naming.Native.ProbeException;
 using Terminal.Gui.App;
 using Terminal.Gui.Configuration;
 using Terminal.Gui.Drawing;
@@ -94,8 +95,14 @@ internal static class RadarApp
             $"{UiText.Safe(Candidate.Name)}  ·  {UiText.Safe(Candidate.Source)}  ·  {Candidate.Confidence}";
     }
     private sealed record EditorRow(NamingCapability Capability, CheckBox Check, TextField Text);
+    private static bool NeedsElevation(NamingCapability c) => c.IsSupported && !c.CanWrite &&
+        c.RequiresAdministrator && c.Reason == "administrator-required";
+    private static bool NeedsElevationToEdit(IReadOnlyList<NamingCapability> capabilities) =>
+        !capabilities.Any(c => c.CanWrite) && capabilities.Any(NeedsElevation);
+    private static bool HasUniqueLocation(DeviceSnapshot device, string locationId) =>
+        device.Locations.Count(location => location.Id == locationId) == 1;
 
-    public static int Run()
+    public static int Run(string? resumeToken = null)
     {
         using var appearance = ConsoleAppearance.Prepare();
         using IApplication app = Application.Create().Init(DriverRegistry.Names.ANSI);
@@ -106,7 +113,13 @@ internal static class RadarApp
         var loaded = state.LoadSettings();
         var ui = new UiText(loaded.Settings.Language);
         var identify = new IdentificationService(Runtime.BaseDirectory);
-        var main = new Main(app, inventory, naming, state, ui, identify, loaded);
+        ElevationContext? resume = null;
+        if (resumeToken is not null && Runtime.IsAdministrator)
+        {
+            try { resume = ElevationContext.Consume(resumeToken); }
+            catch (Exception) { /* Invalid or unavailable context does not execute an action. */ }
+        }
+        var main = new Main(app, inventory, naming, state, ui, identify, loaded, resume);
         using var watcher = inventory.Watch(items => app.Invoke(() => main.Update(items)),
                                             error => app.Invoke(() => main.Error(error)));
         app.Run(main.Window);
@@ -133,6 +146,7 @@ internal static class RadarApp
         private TextView? locateMessage;
         private Button? locateSelect;
         private Button? locateCancel;
+        private Button? locateRetry;
         private readonly Dictionary<string, string> displayNames = new(StringComparer.OrdinalIgnoreCase);
         private readonly ObservableCollection<DeviceRow> rows = [];
         private readonly ListView<DeviceRow> list;
@@ -145,7 +159,7 @@ internal static class RadarApp
         public Window Window { get; }
         private string T(string zh, string en) => ui.Get(zh, en);
         public Main(IApplication a, InventoryService i, NamingService n, PortableState s, UiText u,
-                    IdentificationService id, SettingsLoadResult loaded)
+                    IdentificationService id, SettingsLoadResult loaded, ElevationContext? resume = null)
         {
             app = a;
             inventory = i;
@@ -230,7 +244,7 @@ internal static class RadarApp
             {
                 if (modal)
                 {
-                    if (locateSession is not null && locateSession.Match is null && locateCancel?.HasFocus != true && key == Key.Enter)
+                    if (locateSession is not null && locateSession.Match is null && locateCancel?.HasFocus != true && locateRetry?.HasFocus != true && key == Key.Enter)
                         key.Handled = true;
                     return;
                 }
@@ -322,7 +336,21 @@ internal static class RadarApp
             app.ScreenChanged += (_, screen) => Layout(screen.Value.Width, screen.Value.Height);
             Translate();
             Layout(app.Driver?.Cols ?? 80, app.Driver?.Rows ?? 24);
+            if (resume is not null)
+            {
+                checking = true;
+                search.Text = resume.Search;
+                external.Value = resume.External ? CheckState.Checked : CheckState.UnChecked;
+                offline.Value = resume.Offline ? CheckState.Checked : CheckState.UnChecked;
+                internalDevices.Value = resume.Internal ? CheckState.Checked : CheckState.UnChecked;
+                virtualDevices.Value = resume.Virtual ? CheckState.Checked : CheckState.UnChecked;
+                selectedId = resume.DeviceId;
+                checking = false;
+            }
             Scan();
+            if (resume?.DeviceId is { } resumedId && (!devices.Any(d => d.IsPresent && StringComparer.OrdinalIgnoreCase.Equals(d.DeviceId, resumedId)) ||
+                !StringComparer.OrdinalIgnoreCase.Equals(selectedId, resumedId)))
+                status.Text = T("原设备已离线或不匹配筛选，请重新选择。", "The previous device is offline or no longer matches the filters; select again.");
         }
         private void Save()
         {
@@ -595,12 +623,17 @@ internal static class RadarApp
             var historyToken = app.Begin(historyDialog);
             if (historyList.Value?.Entry != sample || !historyDetail.Text.Contains(sample.OriginalName) ||
                 !historyDetail.Text.Contains(sample.ProposedName) || !app.ToString().Contains(sample.OriginalName) ||
-                !app.ToString().Contains(sample.ProposedName))
+                !app.ToString().Contains(sample.ProposedName) || !app.ToString().Contains("核验"))
                 throw new InvalidOperationException("History detail is not visible at 80x24");
             historyList.Value = new HistoryRow(secondSample, LocationName(secondSample.LocationId), ui.Reason(secondSample.Reason));
             if (!historyDetail.Text.Contains(secondSample.OriginalName) || !historyDetail.Text.Contains(secondSample.ProposedName))
                 throw new InvalidOperationException("History detail did not follow selection");
             if (historyToken is not null) app.End(historyToken);
+            var (resultDialog, verifyButton) = BuildResultDialog("待核验", true);
+            var resultToken = app.Begin(resultDialog);
+            if (!verifyButton.Enabled || !app.ToString().Contains("重新核验"))
+                throw new InvalidOperationException("Result verification is not available at 80x24");
+            if (resultToken is not null) app.End(resultToken);
 
             SessionToken? refreshConfirmToken = null;
             Dialog? refreshConfirm = null;
@@ -688,12 +721,12 @@ internal static class RadarApp
                 $"{UiText.Safe(d.Connection)}  ·  {(d.IsPresent ? T("在线", "Connected") : T("离线", "Disconnected"))}";
             try
             {
-                var caps = naming.Capabilities(d).OrderByDescending(c => c.CanWrite).ToArray();
-                rename.Enabled = d.IsPresent && caps.Any(c => c.CanWrite);
+                var caps = naming.Capabilities(d).OrderByDescending(c => c.IsSupported).ToArray();
+                rename.Enabled = d.IsPresent && caps.Any(c => c.IsSupported);
                 history.Enabled = storedHistory.Any(entry => entry.Status == "unavailable" ||
                     caps.Any(cap => cap.LocationId == entry.LocationId));
                 locations.Enabled = caps.Length > 0;
-                details.Text = T($"{caps.Length} 个命名位置 · {caps.Count(c => c.CanWrite)} 个可改名", $"{caps.Length} naming locations · {caps.Count(c => c.CanWrite)} writable") + "\n\n" +
+                details.Text = T($"{caps.Length} 个命名位置 · {caps.Count(c => c.IsSupported)} 个支持改名", $"{caps.Length} naming locations · {caps.Count(c => c.IsSupported)} supported") + "\n\n" +
                     string.Join("\n\n", caps.Select(c =>
                         $"{ui.Kind(c.Location.Kind)}: {(c.CanWrite ? T("可改名", "Rename available") : ui.Reason(c.Reason))}"));
             }
@@ -740,21 +773,22 @@ internal static class RadarApp
         private void RedrawMain() => app.Invoke(() => { Window.SetNeedsDraw(); app.LayoutAndDraw(true); });
         private void StartLocate()
         {
-            // Take an unfiltered, current baseline; locating never depends on the selected row.
-            Scan();
-            locateSession = new LocateSession(devices);
-            using var dialog = BuildLocateDialog();
-            try
+            while (true)
             {
-                app.Run(dialog);
-                SelectLocatedDevice(dialog.Result);
-            }
-            finally
-            {
-                locateSession = null;
-                locateMessage = null;
-                locateSelect = null;
-                locateCancel = null;
+                Scan();
+                locateSession = new LocateSession(devices);
+                using var dialog = BuildLocateDialog();
+                int? result;
+                try { app.Run(dialog); result = dialog.Result; SelectLocatedDevice(result); }
+                finally
+                {
+                    locateSession = null;
+                    locateMessage = null;
+                    locateSelect = null;
+                    locateCancel = null;
+                    locateRetry = null;
+                }
+                if (result != 2) return;
             }
         }
         private Dialog BuildLocateDialog()
@@ -764,10 +798,12 @@ internal static class RadarApp
             dialog.Add(locateMessage);
             locateCancel = Button(T("_取消", "_Cancel"));
             locateSelect = Button(T("_选中设备", "_Select device"));
+            locateRetry = Button(T("_重新定位", "_Retry"));
             locateSelect.Enabled = false;
             locateSelect.IsDefault = true;
             dialog.AddButton(locateCancel);
             dialog.AddButton(locateSelect);
+            dialog.AddButton(locateRetry);
             dialog.IsRunningChanged += (_, running) =>
             {
                 if (running.Value && locateSession?.Match is null) locateMessage.SetFocus();
@@ -793,10 +829,14 @@ internal static class RadarApp
             if (locateSession is null || locateMessage is null || locateSelect is null) return;
             var found = locateSession.Match;
             locateSelect.Enabled = found is not null;
+            locateRetry!.Enabled = locateSession.Candidates.Count > 1;
             locateMessage.Text = found is not null
                 ? T("已重新连接\n\n", "Reconnected\n\n") + UiText.Safe(DisplayName(found)) + "\n\n" +
                   T("按 Enter 在设备列表中选中该设备。\n本次识别仅确认当前 Windows 设备条目。",
                     "Press Enter to select this device in Devices.\nThis identifies the current Windows device entry.")
+                : locateSession.Candidates.Count > 1
+                    ? T("检测到多个重连条目，请重新定位：\n\n", "Multiple entries reconnected; retry locating:\n\n") +
+                      string.Join("\n", locateSession.Candidates.Select(item => UiText.Safe(DisplayName(item))))
                 : locateSession.DisconnectedNames.Count > 0
                     ? T("已断开\n\n", "Disconnected\n\n") + string.Join("\n", locateSession.DisconnectedNames.Select(UiText.Safe)) + "\n\n" +
                       T("请重新连接设备，等待名称出现。", "Reconnect the device and wait for its name to appear.")
@@ -944,6 +984,12 @@ internal static class RadarApp
         }
         private void Edit(DeviceSnapshot device)
         {
+            var capabilities = naming.Capabilities(device);
+            if (NeedsElevationToEdit(capabilities))
+            {
+                Elevate();
+                return;
+            }
             var (d, editors) = BuildEditor(device);
             while (true)
             {
@@ -1009,19 +1055,52 @@ internal static class RadarApp
             app.Run(d);
             return d.Result == 1;
         }
+        private (Dialog Dialog, Button Verify) BuildResultDialog(string text, bool canVerify)
+        {
+            var dialog = Dialog(T("修改结果", "Result"), 20);
+            dialog.Add(new TextView { X = 1, Y = 1, Width = Dim.Fill(1), Height = Dim.Fill(1), Text = text, ReadOnly = true, WordWrap = true });
+            var verify = Button(T("_重新核验", "_Verify again"));
+            verify.Enabled = canVerify;
+            dialog.AddButton(Button(T("_关闭", "_Close")));
+            dialog.AddButton(verify);
+            return (dialog, verify);
+        }
         private void Result(NamingResult result)
         {
-            var text = string.Join("\n\n", result.Locations.Select(l =>
-                $"{T("位置", "Location")}: {LocationName(l.LocationId)}\n" +
-                $"{T("状态", "Status")}: {UiText.Safe(l.Status)}\n" +
-                $"API: {l.ApiSucceeded?.ToString() ?? "—"}\n" +
-                $"{T("回读", "Readback")}: {UiText.Safe(l.ObservedState)}\n" +
-                $"{T("观测名称", "Observed name")}: {UiText.Safe(l.ObservedName)}\n" +
-                $"{T("同步", "Sync")}: {UiText.Safe(l.SynchronizedState)}\n" +
-                $"{T("界面", "Interface")}: {UiText.Safe(l.InterfaceVerification)}\n" +
-                $"{T("重连", "Reconnect")}: {UiText.Safe(l.ReconnectVerification)}\n" +
-                $"{T("原因", "Reason")}: {ui.Reason(l.Reason)}"));
-            ShowText(T("修改结果", "Result"), text);
+            while (true)
+            {
+                var text = string.Join("\n\n", result.Locations.Select(l =>
+                    $"{T("位置", "Location")}: {LocationName(l.LocationId)}\n" +
+                    $"{T("状态", "Status")}: {UiText.Safe(l.Status)}\n" +
+                    $"API: {l.ApiSucceeded?.ToString() ?? "—"}\n" +
+                    $"{T("回读", "Readback")}: {UiText.Safe(l.ObservedState)}\n" +
+                    $"{T("观测名称", "Observed name")}: {UiText.Safe(l.ObservedName)}\n" +
+                    $"{T("同步", "Sync")}: {UiText.Safe(l.SynchronizedState)}\n" +
+                    $"{T("界面", "Interface")}: {UiText.Safe(l.InterfaceVerification)}\n" +
+                    $"{T("重连", "Reconnect")}: {UiText.Safe(l.ReconnectVerification)}\n" +
+                    $"{T("原因", "Reason")}: {ui.Reason(l.Reason)}"));
+                var (dialog, _) = BuildResultDialog(text, result.Locations.Any(l => !string.IsNullOrEmpty(l.RecordToken)));
+                app.Run(dialog);
+                if (dialog.Result != 1) return;
+                var locations = result.Locations.ToArray();
+                for (int i = 0; i < locations.Length; i++)
+                {
+                    if (string.IsNullOrEmpty(locations[i].RecordToken)) continue;
+                    try { locations[i] = naming.Verify(locations[i].RecordToken).Locations.Single(); }
+                    catch (Exception e)
+                    {
+                        locations[i] = locations[i] with
+                        {
+                            Command = "verify", Status = "unverified", WriteAttempted = false, ApiSucceeded = null,
+                            ObservedState = "unavailable", ResolvedState = null, SynchronizedState = null,
+                            ObservedName = null, Reason = NamingService.ErrorCode(e), NativeError = null,
+                            NotificationCount = null, EventToken = null, InterfaceVerification = "unverified",
+                            ReconnectVerification = "unverified", RebootVerification = "unverified"
+                        };
+                    }
+                }
+                result = new NamingResult(result.Status, locations);
+            }
         }
         private string LocationName(string id)
         {
@@ -1036,13 +1115,15 @@ internal static class RadarApp
             var list = new ListView<HistoryRow> { X = 1, Y = 1, Width = Dim.Fill(1), Height = 5 };
             var detail = new TextView { X = 1, Y = 7, Width = Dim.Fill(1), Height = Dim.Fill(1), ReadOnly = true, WordWrap = true };
             var restore = Button(T("_恢复预览", "_Restore preview"));
+            var verify = Button(T("_核验", "_Verify"));
             var capabilities = Selected is { } device ? naming.Capabilities(device) : [];
             bool CanPreviewRestore(HistoryEntry? entry) => entry is not null &&
                 entry.RecordToken.Length > 0 && entry.Status != "unavailable" &&
-                capabilities.Any(capability => capability.CanWrite && capability.LocationId == entry.LocationId);
+                capabilities.Any(capability => capability.IsSupported && capability.LocationId == entry.LocationId);
             void UpdateDetail(HistoryRow? row)
             {
                 restore.Enabled = CanPreviewRestore(row?.Entry);
+                verify.Enabled = row is not null && row.Entry.RecordToken.Length > 0 && row.Entry.Status != "unavailable";
                 detail.Text = row is null ? T("没有历史记录", "No history records") :
                     $"{T("位置", "Location")}: {row.Location}\n" +
                     $"{T("状态", "Status")}: {UiText.Safe(row.Entry.Status)}\n" +
@@ -1057,15 +1138,35 @@ internal static class RadarApp
             dialog.Add(list, detail);
             dialog.AddButton(Button(T("_关闭", "_Close")));
             dialog.AddButton(restore);
+            dialog.AddButton(verify);
             return (dialog, list, detail);
         }
         private void History(DeviceSnapshot device)
         {
-            var (dialog, list, _) = BuildHistoryDialog(naming.History(device));
+            var (dialog, list, _) = BuildHistoryDialog(storedHistory.Where(entry => entry.Status == "unavailable" ||
+                device.Locations.Any(location => location.Id == entry.LocationId)));
             app.Run(dialog);
-            if (dialog.Result != 1 || list.Value is null || list.Value.Entry.Status == "unavailable")
+            if (list.Value is null || list.Value.Entry.Status == "unavailable")
                 return;
             var selected = list.Value.Entry;
+            if (dialog.Result == 2)
+            {
+                Result(naming.Verify(selected.RecordToken));
+                return;
+            }
+            if (dialog.Result != 1) return;
+            var current = inventory.Scan().Where(d => d.IsPresent && StringComparer.OrdinalIgnoreCase.Equals(d.DeviceId, device.DeviceId)).ToArray();
+            if (current.Length != 1 || !HasUniqueLocation(current[0], selected.LocationId))
+                throw new ProbeException("selection-identity-changed");
+            device = current[0];
+            var capability = naming.Capabilities(device).SingleOrDefault(c => c.LocationId == selected.LocationId);
+            if (capability is not null && NeedsElevation(capability))
+            {
+                Elevate();
+                return;
+            }
+            if (capability is null || !capability.CanWrite)
+                throw new ProbeException(capability?.Reason ?? "location-not-found");
             if (device.Identity.Strength == IdentityStrength.Weak &&
                 !Confirm(
                     T("确认当前实物", "Confirm physical device"),
@@ -1144,12 +1245,20 @@ internal static class RadarApp
                 return;
             }
             modal = true;
+            string? token = null;
+            bool started = false;
             try
             {
                 if (Confirm(T("管理员重开", "Restart as administrator"),
-                            T("将请求 Windows 管理员权限并重新打开程序。",
-                              "Request Windows administrator permission and restart the application.")) &&
-                    Runtime.RequestElevation())
+                            T("将请求管理员权限。重开后恢复设备和筛选，操作需要重新预览并确认。",
+                              "Request administrator permission. The device and filters will be restored; review and confirm the operation again.")))
+                {
+                    token = ElevationContext.Save(new(1, DateTimeOffset.UtcNow, selectedId, search.Text ?? "",
+                        external.Value == CheckState.Checked, offline.Value == CheckState.Checked,
+                        internalDevices.Value == CheckState.Checked, virtualDevices.Value == CheckState.Checked));
+                    started = Runtime.RequestElevation(token);
+                }
+                if (started)
                     app.RequestStop();
             }
             catch (Exception e)
@@ -1158,6 +1267,11 @@ internal static class RadarApp
             }
             finally
             {
+                if (!started && token is not null)
+                {
+                    try { ElevationContext.Discard(token); }
+                    catch (Exception e) { Error(e); }
+                }
                 modal = false;
                 RedrawMain();
             }
@@ -1177,6 +1291,20 @@ internal static class RadarApp
     private static void Capture(string? directory)
     {
         LocateSession.SelfCheck();
+        ElevationContext.SelfCheck();
+        var location = new NamingLocation("check", NamingLocationKind.Pnp, "check", "check", true);
+        var privileged = new NamingCapability(location, false, "administrator-required", "check", null, true, "") { IsSupported = true };
+        if (!NeedsElevation(privileged) || NeedsElevation(privileged with { IsSupported = false }) ||
+            NeedsElevation(privileged with { Reason = "target-offline" }))
+            throw new InvalidOperationException("Permission guidance failed");
+        var writable = privileged with { CanWrite = true, RequiresAdministrator = false, Reason = "ready" };
+        if (!NeedsElevationToEdit([privileged]) || NeedsElevationToEdit([privileged, writable]))
+            throw new InvalidOperationException("Mixed permissions did not open the editor");
+        var inactiveAudio = location with { Kind = NamingLocationKind.AudioPlayback, IsPresent = false };
+        var sampleDevice = new DeviceSnapshot("sample", "sample", "USB", DeviceClassification.External, true,
+            new("sample", null, IdentityStrength.Weak), null, [], [], [inactiveAudio]);
+        if (!HasUniqueLocation(sampleDevice, inactiveAudio.Id) || HasUniqueLocation(sampleDevice, "missing"))
+            throw new InvalidOperationException("History location selection failed");
         var old = Console.Out;
         var env = Environment.GetEnvironmentVariable("DisableRealDriverIO");
         Console.SetOut(TextWriter.Null);

@@ -4,6 +4,7 @@ public sealed record NamingCapability(NamingLocation Location, bool CanWrite, st
     string CurrentName, string? SettingsUri, bool RequiresAdministrator, string Evidence)
 {
     public string LocationId => Location.Id;
+    public bool IsSupported { get; init; } = CanWrite;
 }
 
 public sealed record NameEdit(string LocationId, string NewName);
@@ -37,4 +38,3 @@ public sealed record HistoryEntry(string RecordToken, DateTimeOffset CreatedAtUt
 
 public sealed record UserSettings(string Language = "system", bool ExternalOnly = true);
 public sealed record SettingsLoadResult(UserSettings Settings, string? Warning = null);
-public sealed record ValidationImportResult(string ProfileToken, string TargetKind, string TargetHash);
