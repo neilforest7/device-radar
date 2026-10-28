@@ -1,6 +1,9 @@
 param([ValidateSet('build','publish','package')][string]$Action = 'build')
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
+$project = Join-Path $root 'src\DeviceRadar\DeviceRadar.csproj'
+$version = ([xml](Get-Content -LiteralPath $project -Raw)).Project.PropertyGroup.Version
+if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid release version.' }
 if ($Action -ne 'package') {
 $localDotnet = Join-Path $root '.tools\dotnet\dotnet.exe'
 $candidates = @()
@@ -15,14 +18,13 @@ foreach ($candidate in $candidates) {
 if (-not $dotnet) { throw 'The .NET 10 SDK (10.0.100 or newer) is required. Install it or place it in .tools\dotnet.' }
 $env:DOTNET_CLI_HOME = Join-Path $root '.tools\dotnet-home'
 $env:NUGET_PACKAGES = Join-Path $root '.tools\nuget'
-$project = Join-Path $root 'src\DeviceRadar\DeviceRadar.csproj'
 if ($Action -eq 'build') {
     & $dotnet build $project -c Release
     if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
     return
 }
 }
-$release = Join-Path $root 'artifacts\release\v0.1.0-win-x64'
+$release = Join-Path $root "artifacts\release\v$version-win-x64"
 $zip = "$release.zip"
 $zipHash = "$zip.sha256"
 if ($Action -eq 'publish' -and ((Test-Path -LiteralPath $release) -or (Test-Path -LiteralPath $zip) -or (Test-Path -LiteralPath $zipHash))) { throw "Release output already exists at $release. Move or remove it before rebuilding." }

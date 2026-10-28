@@ -13,6 +13,7 @@ def main():
     p.add_argument("--exe", required=True, type=Path)
     p.add_argument("--output", required=True, type=Path)
     p.add_argument("--query", required=True, help="Local search text for a real device")
+    p.add_argument("--expect-editor", action="store_true", help="Require the editable location and preview flow")
     args = p.parse_args()
     c = Controller(args.exe.resolve(), args.output.resolve(), 144, 24)
     steps = []
@@ -109,35 +110,55 @@ def main():
         step("key", key="right")
         step("key", key="enter")
         next_action = snap("10-next-enabled-action")
-        require(text_has(next_action, "History", "历史") or text_has(next_action, "Technical details", "技术详情"),
+        require(text_has(next_action, "Local connection candidate history", "本机当前连接的候选记录") or
+                text_has(next_action, "Technical details", "技术详情") or
+                text_has(next_action, "Current:", "当前：") or
+                text_has(next_action, "Request administrator permission", "将请求管理员权限"),
                 "arrow navigation reaches the next enabled detail action")
-        click_label(next_action, "[> Close <]" if "[> Close <]" in next_action else "[> 关闭 <]")
+        step("key", key="escape")
+        snap("10-next-action-cancel")
         step("key", key="tab")
 
         # For a device with no writable location, clicking the disabled Rename button must do nothing.
-        if "0 writable" in main or "0 个可改名" in main:
+        if "0 supported" in main or "0 个支持改名" in main:
             click_label(main, "[ Rename ]" if "[ Rename ]" in main else "[ 改名 ]")
             disabled_rename = snap("11-disabled-rename")
             require(not text_has(disabled_rename, "Current:", "当前："), "disabled Rename does not open editor")
         else:
             click_label(main, "[ Rename ]" if "[ Rename ]" in main else "[ 改名 ]")
             editor = snap("11-editor")
-            require(text_has(editor, "Current:", "当前："), "enabled Rename opens editor")
-            if text_has(editor, "Preview", "预览修改"):
+            if not text_has(editor, "Request administrator permission", "将请求管理员权限") and not text_has(editor, "Current:", "当前："):
+                # A first mouse click may only move focus to the button.
+                step("key", key="enter")
+                editor = snap("11-editor")
+            elevation = text_has(editor, "Request administrator permission", "将请求管理员权限")
+            if args.expect_editor:
+                require(not elevation and text_has(editor, "Current:", "当前："), "mixed permissions open the editor")
+            require(elevation or text_has(editor, "Current:", "当前："),
+                    "enabled Rename opens editor or requests administrator permission")
+            if not elevation and text_has(editor, "Preview", "预览修改"):
                 click_label(editor, "Preview" if "Preview" in editor else "预览修改")
                 preview = snap("12-preview")
                 require(text_has(preview, "Confirm to write", "确认后逐项写入"), "preview opens without writing")
                 click_label(preview, "Back" if "Back" in preview else "返回")
                 editor = snap("13-back")
                 require(text_has(editor, "Current:", "当前："), "preview returns to editor")
+            elif args.expect_editor:
+                raise AssertionError("Editor has no preview action")
             step("key", key="escape")
-            step("wait_not", contains="Current:" if "Current:" in editor else "当前：", timeout=15)
+            marker = ("Request administrator permission" if "Request administrator permission" in editor else "将请求管理员权限") if elevation else ("Current:" if "Current:" in editor else "当前：")
+            step("wait_not", contains=marker, timeout=15)
             snap("14-cancel")
 
         # Append a non-matching suffix, then prove F3 guidance opens and Escape cancels.
+        # Wait for the device-action scan to finish before sending another shortcut.
+        step("sleep", seconds=2)
         step("key", key="/")
+        step("sleep", seconds=1)
         step("text", text="xyz-no-match")
         no_match = snap("15-no-match")
+        require("xyz-no-match" in no_match and text_has(no_match, "No matching device", "没有匹配设备"),
+                "search focus accepts the non-matching suffix")
         step("key", key="f3")
         step("wait", contains="Disconnect the device you want to find"
              if "Search" in no_match else "断开要查找的设备", timeout=30)
@@ -168,14 +189,14 @@ def main():
             step("key", key="f4")
             confirm = snap("21-elevation-confirm")
             require(text_has(confirm, "Restart as administrator", "管理员重开") and
-                    text_has(confirm, "Request Windows administrator permission", "将请求 Windows 管理员权限"),
+                    text_has(confirm, "Request administrator permission", "将请求管理员权限"),
                     "F4 opens elevation confirmation")
             step("key", key="escape")
-            step("wait_not", contains="Request Windows administrator permission"
-                 if "Request Windows administrator permission" in confirm else "将请求 Windows 管理员权限",
+            step("wait_not", contains="Request administrator permission"
+                 if "Request administrator permission" in confirm else "将请求管理员权限",
                  timeout=10)
             cancelled = snap("22-elevation-cancel")
-            require(not text_has(cancelled, "Request Windows administrator permission", "将请求 Windows 管理员权限"),
+            require(not text_has(cancelled, "Request administrator permission", "将请求管理员权限"),
                     "Escape cancels elevation before any UAC request")
         else:
             print("SKIP F4: current process is already elevated", flush=True)

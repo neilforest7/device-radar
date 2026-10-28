@@ -4,49 +4,12 @@ using Microsoft.Win32.SafeHandles;
 
 namespace DeviceRadar.Naming.Native;
 
-internal sealed class LiveDevices : IDisposable
-{
-    private readonly DeviceInfoSet handle;
-    public List<DeviceNode> Candidates { get; } = [];
-    public int MouseCount { get; }
-
-    public LiveDevices(string? selectedId = null)
-    {
-        var classGuid = Format.MouseClass;
-        handle = Native.SetupDiGetClassDevsW(ref classGuid, null, IntPtr.Zero, 2 /* DIGCF_PRESENT */);
-        if (handle.IsInvalid) throw Native.Error("enumeration-failed");
-        try
-        {
-            for (uint index = 0; ; index++)
-            {
-                if (index > 4096) throw new ProbeException("device-count-limit");
-                var data = new Native.DeviceInfoData { CbSize = (uint)Marshal.SizeOf<Native.DeviceInfoData>() };
-                if (!Native.SetupDiEnumDeviceInfo(handle, index, ref data))
-                {
-                    var error = Marshal.GetLastWin32Error();
-                    if (error == 259 /* ERROR_NO_MORE_ITEMS */) break;
-                    throw new ProbeException("enumeration-failed", error);
-                }
-                MouseCount++;
-                if (data.ClassGuid != Format.MouseClass) throw new ProbeException("unexpected-device-class");
-                var node = new DeviceNode(handle, data);
-                if (Format.IsCandidateId(node.InstanceId) && (selectedId is null || node.InstanceId == selectedId)) Candidates.Add(node);
-            }
-        }
-        catch { handle.Dispose(); throw; }
-    }
-
-    public DeviceNode Unique() => Candidates.Count == 1 ? Candidates[0]
-        : throw new ProbeException(Candidates.Count == 0 ? "target-offline" : "target-ambiguous");
-
-    public void Dispose() => handle.Dispose();
-}
-
 internal sealed class DeviceNode(DeviceInfoSet handle, Native.DeviceInfoData initialData)
 {
     private Native.DeviceInfoData data = initialData;
     public string InstanceId { get; } = GetInstanceId(handle, initialData);
     public Guid ClassGuid => data.ClassGuid;
+    public uint DevInst => data.DevInst;
 
     public DeviceIdentity Identity(DeviceAncestor[]? ancestors = null)
     {
@@ -78,8 +41,6 @@ internal sealed class DeviceNode(DeviceInfoSet handle, Native.DeviceInfoData ini
     public DeviceSnapshot Snapshot()
     {
         var identity = Identity();
-        if (identity.ClassGuid != Format.MouseClass || !Format.IsCandidateId(identity.InstanceId)
-            || !identity.HardwareIds.Any(Format.IsCandidateId)) throw new ProbeException("hardware-id-mismatch");
         var friendly = Read(Native.FriendlyName);
         Safety.ValidateOriginal(friendly);
         var name = Format.Text(Read(Native.Name)) ?? Format.Text(friendly) ?? Format.Text(Read(Native.DeviceDescription)) ?? "";
@@ -148,6 +109,40 @@ internal sealed class DeviceInfoSet : SafeHandleZeroOrMinusOneIsInvalid
     protected override bool ReleaseHandle() => Native.SetupDiDestroyDeviceInfoList(handle);
 }
 
+internal sealed class SelectedDevice : IDisposable
+{
+    private readonly DeviceInfoSet handle;
+    public DeviceNode Node { get; private set; } = null!;
+
+    public SelectedDevice(string instanceId)
+    {
+        if (instanceId is not { Length: > 0 and <= 4096 } || instanceId.Any(char.IsControl))
+            throw new ProbeException("invalid-instance-id");
+        handle = Native.SetupDiCreateDeviceInfoList(IntPtr.Zero, IntPtr.Zero);
+        if (handle.IsInvalid) throw Native.Error("device-open-failed");
+        try
+        {
+            var data = new Native.DeviceInfoData { CbSize = (uint)Marshal.SizeOf<Native.DeviceInfoData>() };
+            if (!Native.SetupDiOpenDeviceInfoW(handle, instanceId, IntPtr.Zero, 0, ref data))
+                throw Native.Error("target-offline");
+            Node = new DeviceNode(handle, data);
+            if (!string.Equals(Node.InstanceId, instanceId, StringComparison.OrdinalIgnoreCase))
+                throw new ProbeException("target-mismatch");
+            EnsurePresent();
+        }
+        catch { handle.Dispose(); throw; }
+    }
+
+    public void EnsurePresent()
+    {
+        var result = Native.CM_Locate_DevNodeW(out var currentDevInst, Node.InstanceId, 0 /* CM_LOCATE_DEVNODE_NORMAL */);
+        if (result != 0) throw new ProbeException("target-offline", result);
+        if (currentDevInst != Node.DevInst) throw new ProbeException("target-mismatch");
+    }
+
+    public void Dispose() => handle.Dispose();
+}
+
 internal static class Native
 {
     [StructLayout(LayoutKind.Sequential)]
@@ -182,6 +177,14 @@ internal static class Native
     internal static extern DeviceInfoSet SetupDiGetClassDevsW(ref Guid classGuid, string? enumerator, IntPtr hwndParent, uint flags);
 
     [DllImport("setupapi.dll", SetLastError = true, ExactSpelling = true)]
+    internal static extern DeviceInfoSet SetupDiCreateDeviceInfoList(IntPtr classGuid, IntPtr hwndParent);
+
+    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool SetupDiOpenDeviceInfoW(DeviceInfoSet deviceInfoSet, string deviceInstanceId,
+        IntPtr hwndParent, uint openFlags, ref DeviceInfoData deviceInfoData);
+
+    [DllImport("setupapi.dll", SetLastError = true, ExactSpelling = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool SetupDiEnumDeviceInfo(DeviceInfoSet deviceInfoSet, uint index, ref DeviceInfoData data);
 
@@ -199,6 +202,9 @@ internal static class Native
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool SetupDiSetDevicePropertyW(DeviceInfoSet deviceInfoSet, ref DeviceInfoData data,
         ref PropertyKey key, uint type, [In] byte[]? buffer, uint bufferSize, uint flags);
+
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+    internal static extern int CM_Locate_DevNodeW(out uint devInst, string deviceInstanceId, uint flags);
 
     [DllImport("setupapi.dll", SetLastError = true, ExactSpelling = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

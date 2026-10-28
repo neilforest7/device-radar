@@ -18,6 +18,7 @@ internal static class Program
         {
             if (!Runtime.IsSupportedWindows) { Output(new { status = "error", error = "Windows 10 build 19045 or later, x64, is required." }); return 1; }
             if (args.Length == 0) return RadarApp.Run();
+            if (args is ["--resume", var resumeToken]) return RadarApp.Run(resumeToken);
             if (args is ["--file-check"])
             {
                 var count = NamingService.FileCheck();
@@ -34,12 +35,6 @@ internal static class Program
                 return 0;
             }
             if (args is ["--snapshot-dir", var dir]) return RadarApp.WriteSnapshots(dir);
-            if (args is ["import-validation", "--directory", var evidenceDirectory, "--record", var evidenceRecord])
-            {
-                var result = new NamingService().ImportValidationEvidence(evidenceDirectory, evidenceRecord);
-                Output(new { status = "imported", result, systemWrites = 0 });
-                return 0;
-            }
             if (args is ["inventory"])
             {
                 Output(new { devices = Scan().Select(DeviceView).ToArray() });
@@ -49,7 +44,7 @@ internal static class Program
             {
                 var device = FindDevice(capabilityDevice);
                 var capabilities = new NamingService().Capabilities(device);
-                Output(new { device = Token(device.DeviceId), capabilities = capabilities.Select(c => new { location = Token(c.LocationId), c.Location.Kind, c.CurrentName, c.CanWrite, c.Reason, c.RequiresAdministrator, c.Evidence, c.SettingsUri }).ToArray() });
+                Output(new { device = Token(device.DeviceId), capabilities = capabilities.Select(c => new { location = Token(c.LocationId), c.Location.Kind, c.CurrentName, c.IsSupported, c.CanWrite, c.Reason, c.RequiresAdministrator, c.Evidence, c.SettingsUri }).ToArray() });
                 return 0;
             }
             if (args is ["history", "--device", var historyDevice])
@@ -92,7 +87,7 @@ internal static class Program
                 Output(new { results });
                 return results.All(r => r.Success) ? 0 : 1;
             }
-            Output(new { status = "usage", commands = new[] { "inventory", "capabilities --device <token>", "history --device <token>", "prepare --device <token> --location <token> --name <name>", "apply --record <token>", "verify --record <token>", "restore --record <token>", "restore-preview --record <token>", "restore-history --record <token>", "import-validation --directory <directory> --record <token>", "update-identification", "--self-check", "--snapshot-dir <directory>" } });
+            Output(new { status = "usage", commands = new[] { "inventory", "capabilities --device <token>", "history --device <token>", "prepare --device <token> --location <token> --name <name>", "apply --record <token>", "verify --record <token>", "restore --record <token>", "restore-preview --record <token>", "restore-history --record <token>", "update-identification", "--self-check", "--snapshot-dir <directory>" } });
             return 2;
         }
         catch (Exception error)

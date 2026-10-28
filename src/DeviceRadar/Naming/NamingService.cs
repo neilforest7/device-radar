@@ -26,26 +26,23 @@ public sealed partial class NamingService
             _ => "ms-settings:devices"
         };
         NamingCapability Blocked(string reason) => new(location, false, reason, location.Name, settings,
-            location.Kind == NamingLocationKind.Pnp, "This device and naming location have not passed the complete validated workflow.");
+            location.Kind is NamingLocationKind.Pnp or NamingLocationKind.BluetoothClassic, Evidence(location.Kind));
         if (!device.IsPresent) return Blocked("target-offline");
-        if (!location.IsPresent) return Blocked(location.Kind is NamingLocationKind.AudioPlayback or NamingLocationKind.AudioRecording
-            ? "audio-endpoint-inactive" : "target-offline");
-        if (location.Kind == NamingLocationKind.BluetoothLe) return Blocked("ble-reversible-path-unverified");
-        if (location.Kind == NamingLocationKind.BluetoothClassic) return Blocked("classic-settings-and-persistence-unverified");
-        if (location.Kind == NamingLocationKind.AudioPlayback) return Blocked("audio-playback-unverified");
+        if (!location.IsPresent && location.Kind is not (NamingLocationKind.AudioPlayback or NamingLocationKind.AudioRecording))
+            return Blocked("target-offline");
+        if (location.Kind == NamingLocationKind.BluetoothLe) return Blocked("ble-next-version");
         var kind = Kind(location);
-        if (kind is null) return Blocked("device-and-location-unverified");
-        if (!OperatingSystem.IsWindows() || !Environment.Is64BitProcess || Runtime.WindowsVersion.Build != 22631)
-            return Blocked("validated-build-required");
+        if (kind is null) return Blocked("naming-location-unsupported");
+        if (!Runtime.IsSupportedWindows) return Blocked("platform-unsupported");
         try
         {
-            using var live = Targets.Open(kind);
+            using var live = Targets.Open(kind, targetId: location.TargetId);
             var snapshot = Select(live, location);
             MatchSelection(device, location, snapshot);
-            Store.RequireValidation(kind, snapshot.Identity);
-            if (kind == Targets.Mouse && !Runtime.IsAdministrator) return Blocked("administrator-required");
-            return new(location, true, "validated-device-and-build", DisplayEditable(kind, snapshot), settings,
-                kind == Targets.Mouse, Evidence(location.Kind));
+            var requiresAdmin = Targets.RequiresAdministrator(kind);
+            var canWrite = !requiresAdmin || Runtime.IsAdministrator;
+            return new(location, canWrite, canWrite ? "ready" : "administrator-required", DisplayEditable(kind, snapshot), settings,
+                requiresAdmin, Evidence(location.Kind)) { IsSupported = true };
         }
         catch (Exception error) { return Blocked(ErrorCode(error)); }
     }
@@ -63,14 +60,15 @@ public sealed partial class NamingService
                 ?? throw new ProbeException("location-not-found");
             var capability = Capability(device, location);
             if (!capability.CanWrite) throw new ProbeException(capability.Reason);
-            var kind = Kind(location) ?? throw new ProbeException("device-and-location-unverified");
+            var kind = Kind(location) ?? throw new ProbeException("naming-location-unsupported");
             var proposed = Targets.Proposed(kind, edit.NewName);
-            using var live = Targets.Open(kind);
+            using var live = Targets.Open(kind, targetId: location.TargetId);
             var current = Select(live, location);
             MatchSelection(device, location, current);
-            var record = NewRecord(kind, current, edit.NewName, proposed);
+            var record = NewRecord(kind, current, edit.NewName, proposed, Store.Machine);
             Safety.ValidateRecord(record);
             Safety.ValidateAudioBaseline(record, current);
+            Safety.ValidateClassicBaseline(record, current);
             entries.Add(Entry(record, location.Kind));
             records.Add(record);
         }
@@ -84,19 +82,27 @@ public sealed partial class NamingService
         using var live = Targets.Open(source.Record.TargetKind, source.Record.Target);
         var current = live.Unique();
         Safety.MatchIdentity(source.Record, Store.Machine, current.Identity);
-        Store.RequireValidation(source.Record.TargetKind, current.Identity);
+        RequireKnownRestoreState(source, current);
+        return CreateRestorePreview(source.Record, current, Store.Machine);
+    }
+
+    private static NamingPreview CreateRestorePreview(OperationRecord source, NativeSnapshot current, string machine)
+    {
         // A selected older version becomes a fresh operation. Its before-value is the present
         // configuration, so cancellation and an intervening external rename are both safe.
-        var desired = Clone(source.Record.Original);
-        var desiredName = Format.Text(desired, Targets.PropertyType(source.Record.TargetKind)) ?? source.Record.OriginalResolvedName;
-        var record = NewRecord(source.Record.TargetKind, current, desiredName, desired) with
+        var desired = Clone(source.Original);
+        var desiredName = Targets.ValueText(source.TargetKind, desired)
+            ?? (source.TargetKind == Targets.BluetoothClassic
+                ? ClassicTarget.DeviceName(source.OriginalBluetoothSources!.DeviceName) : source.OriginalResolvedName);
+        var record = NewRecord(source.TargetKind, current, desiredName, desired, machine) with
         {
-            Purpose = "restore", SourceOperationId = source.Record.OperationId
+            Purpose = "restore", SourceOperationId = source.OperationId
         };
-        if (Targets.ResolvedSuffix(source.Record) != current.ResolvedNameSuffix) throw new ProbeException("audio-name-source-changed");
+        if (Targets.ResolvedSuffix(source) != current.ResolvedNameSuffix) throw new ProbeException("audio-name-source-changed");
         Safety.ValidateRecord(record);
         Safety.ValidateAudioBaseline(record, current);
-        var kind = record.TargetKind == Targets.Mouse ? NamingLocationKind.Pnp : NamingLocationKind.AudioRecording;
+        Safety.ValidateClassicBaseline(record, current);
+        var kind = LocationKind(record.TargetKind);
         return new(Format.TargetHash(current.Identity.InstanceId), [Entry(record, kind)], [record]);
     }
 
@@ -111,13 +117,20 @@ public sealed partial class NamingService
             Safety.ValidateRecord(record);
             using var live = Targets.Open(record.TargetKind, record.Target);
             var current = live.Unique();
-            Safety.MatchIdentity(record, Store.Machine, current.Identity);
-            Store.RequireValidation(record.TargetKind, current.Identity);
-            if (!current.FriendlyName.Same(record.Original) || current.SystemName != record.OriginalResolvedName
-                || current.ResolvedNameSuffix != Targets.ResolvedSuffix(record)) throw new ProbeException("preview-stale");
-            Safety.ValidateAudioBaseline(record, current);
+            ValidatePreparedRecord(record, current, Store.Machine);
+            RequireRestoreProvenance(record, current);
         }
         return new(preview.Records.Select(Store.SaveRecoveryPoint).ToArray());
+    }
+
+    private static void ValidatePreparedRecord(OperationRecord record, NativeSnapshot current, string machine)
+    {
+        Safety.ValidateRecord(record);
+        Safety.MatchIdentity(record, machine, current.Identity);
+        if (!current.FriendlyName.Same(record.Original) || current.SystemName != record.OriginalResolvedName
+            || current.ResolvedNameSuffix != Targets.ResolvedSuffix(record)) throw new ProbeException("preview-stale");
+        Safety.ValidateAudioBaseline(record, current);
+        Safety.ValidateClassicBaseline(record, current);
     }
 
     public NamingResult Apply(PreparedNaming prepared)
@@ -137,7 +150,7 @@ public sealed partial class NamingService
     public NamingResult Verify(string recordToken)
     {
         using var lease = Store.Load(recordToken);
-        var observed = Observe(lease.Record);
+        var observed = Observe(lease.Record, Store.HasClassicEmptyAliasIntent(lease));
         var confirmed = Safety.ObservationConfirms(lease.Record.TargetKind, "proposed", observed)
             || Safety.ObservationConfirms(lease.Record.TargetKind, "original", observed);
         return Result([LocationResult(lease, "verify", confirmed ? "verified" : "unverified", false, null, observed, null, null)]);
@@ -145,8 +158,8 @@ public sealed partial class NamingService
 
     public IReadOnlyList<HistoryEntry> History(DeviceSnapshot device)
     {
-        var targetIds = device.Locations.Select(location => PnpId(location.TargetId)).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        return Store.History().Where(item => item.Record is null || targetIds.Contains(item.Record.Target.InstanceId))
+        var locationIds = device.Locations.Select(location => location.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return Store.History().Where(item => item.Record is null || locationIds.Contains(LocationId(item.Record)))
             .Select(item => item.Record is { } record
                 ? new HistoryEntry(item.Token, record.CreatedAtUtc, LocationId(record), record.OriginalResolvedName,
                     record.ProposedName + Targets.ResolvedSuffix(record), item.Status,
@@ -172,31 +185,47 @@ public sealed partial class NamingService
         return new(result.RefreshState, result.ClosedCount, result.Launched, result.Reason, result.NativeError);
     }
 
-    // Explicit local evidence registration only. This never loads an old recovery point for mutation.
-    public ValidationImportResult ImportValidationEvidence(string evidenceDirectory, string oldRecordToken)
-    {
-        RequireBuild();
-        RequireAdministrator();
-        var evidence = Store.ReadValidationEvidence(evidenceDirectory, oldRecordToken);
-        using var live = Targets.Open(evidence.Kind, evidence.Target);
-        var current = live.Unique();
-        Safety.MatchIdentity(evidence.Target, Store.Machine, Store.Machine, current.Identity);
-        if (!current.FriendlyName.Same(evidence.Original)) throw new ProbeException("validation-evidence-baseline-changed");
-        var token = Store.SaveValidation(evidence, current.Identity);
-        return new(token, evidence.Kind, Format.TargetHash(current.Identity.InstanceId));
-    }
-
     private string? HistoryReason(OperationRecord record, string? previousReason)
     {
-        var observed = Observe(record);
-        return observed.State is "other" ? "external-value-changed"
+        using var lease = Store.Load(record.OperationId + ".json");
+        var observed = Observe(record, Store.HasClassicEmptyAliasIntent(lease));
+        var unknown = Targets.IsAudio(record.TargetKind) || record.TargetKind == Targets.BluetoothClassic
+            ? observed.SynchronizedState == "other" : observed.State == "other";
+        return unknown ? "external-value-changed"
             : observed.State is "offline" or "unavailable" ? observed.Reason : previousReason;
     }
 
-    private OperationRecord NewRecord(string kind, NativeSnapshot current, string desiredName, RawValue desired)
-        => new(Format.Version, Guid.NewGuid().ToString("N"), Store.Machine, DateTimeOffset.UtcNow, "prepared",
+    private static OperationRecord NewRecord(string kind, NativeSnapshot current, string desiredName, RawValue desired, string machine)
+        => new(Format.Version, Guid.NewGuid().ToString("N"), machine, DateTimeOffset.UtcNow, "prepared",
             Runtime.SystemDescription, kind, current.Identity, Clone(current.FriendlyName), current.SystemName,
-            desiredName, Clone(desired));
+            desiredName, Clone(desired), OriginalAudioSources: current.AudioNameSources,
+            OriginalBluetoothSources: current.BluetoothNameSources);
+
+    private void RequireKnownRestoreState(RecordLease source, NativeSnapshot current)
+    {
+        // An older version may be selected after several successful local renames. Only
+        // recognize observed states of this exact target; a new external value is a conflict.
+        if (Safety.KnownRestoreState(source.Record, current, Store.HasApplyEvidence(source), Store.HasClassicEmptyAliasIntent(source))) return;
+        foreach (var item in Store.History().Where(item => item.Record is { } record
+            && record.TargetKind == source.Record.TargetKind && LocationId(record) == LocationId(source.Record))
+            .OrderByDescending(item => item.Record!.CreatedAtUtc))
+        {
+            using var candidate = Store.Load(item.Token);
+            try { Safety.MatchIdentity(candidate.Record, Store.Machine, current.Identity); }
+            catch (ProbeException error) when (error.Code == "target-mismatch") { continue; }
+            if (Safety.KnownRestoreState(candidate.Record, current, Store.HasApplyEvidence(candidate),
+                Store.HasClassicEmptyAliasIntent(candidate))) return;
+        }
+        throw new ProbeException("external-value-changed");
+    }
+
+    private void RequireRestoreProvenance(OperationRecord record, NativeSnapshot current)
+    {
+        if (record.TargetKind != Targets.BluetoothClassic || record.Purpose != "restore") return;
+        using var source = Store.Load(record.SourceOperationId + ".json");
+        Safety.MatchIdentity(source.Record, Store.Machine, current.Identity);
+        RequireKnownRestoreState(source, current);
+    }
 
     private NamingLocationResult MutateSafely(string command, string token)
     {
@@ -219,14 +248,17 @@ public sealed partial class NamingService
         var status = "blocked";
         EventLease? intent = null;
         TargetWriteLease? writer = null;
+        var emptyAliasIntent = false;
+        var newEmptyAliasIntent = false;
         try
         {
-            if (lease.Record.TargetKind == Targets.Mouse) RequireAdministrator();
+            if (Targets.RequiresAdministrator(lease.Record.TargetKind)) RequireAdministrator();
             var applyEvidence = Store.HasApplyEvidence(lease);
+            emptyAliasIntent = Store.HasClassicEmptyAliasIntent(lease);
             using var initial = Targets.Open(lease.Record.TargetKind, lease.Record.Target);
             var before = initial.Unique();
-            Store.RequireValidation(lease.Record.TargetKind, before.Identity);
-            var decision = Safety.Decide(lease.Record, Store.Machine, before, command, applyEvidence);
+            RequireRestoreProvenance(lease.Record, before);
+            var decision = Safety.Decide(lease.Record, Store.Machine, before, command, applyEvidence, emptyAliasIntent);
             if (decision == MutationDecision.NoOp) status = "already-at-value";
             else
             {
@@ -234,12 +266,17 @@ public sealed partial class NamingService
                 try
                 {
                     Safety.GuardedWrite(
-                        () => intent = Store.HoldEvent(Event(lease, command, "intent", "write-intent", before: before.FriendlyName)),
+                        () =>
+                        {
+                            var intentEntry = Event(lease, command, "intent", "write-intent", before: before.FriendlyName);
+                            intent = Store.HoldEvent(intentEntry);
+                            newEmptyAliasIntent = Safety.IsClassicEmptyAliasIntent(intentEntry, lease.Record, lease.Hash);
+                        },
                         () =>
                         {
                             final = Targets.Open(lease.Record.TargetKind, lease.Record.Target);
-                            Store.RequireValidation(lease.Record.TargetKind, final.Unique().Identity);
-                            if (Safety.Decide(lease.Record, Store.Machine, final.Unique(), command, applyEvidence) != MutationDecision.Write)
+                            // Keep authorization bound to the evidence that existed before this attempt.
+                            if (Safety.Decide(lease.Record, Store.Machine, final.Unique(), command, applyEvidence, emptyAliasIntent) != MutationDecision.Write)
                                 throw new ProbeException("value-changed-before-write");
                             writer = final.OpenWriter(command == "apply" ? lease.Record.Proposed : lease.Record.Original);
                         },
@@ -259,30 +296,32 @@ public sealed partial class NamingService
         using var durableWriter = writer;
         // A new native enumeration performs readback after either a successful or failed write.
         var wanted = command == "apply" ? "proposed" : "original";
-        var observed = Observe(lease.Record);
-        if (attempted && lease.Record.TargetKind == Targets.UsbMicrophone)
+        var observed = Observe(lease.Record, emptyAliasIntent || newEmptyAliasIntent);
+        if (attempted && lease.Record.TargetKind != Targets.Pnp)
         {
             var propagation = System.Diagnostics.Stopwatch.StartNew();
             while (!Safety.ObservationConfirms(lease.Record.TargetKind, wanted, observed) && propagation.ElapsedMilliseconds < 5000)
             {
                 Thread.Sleep(100);
-                observed = Observe(lease.Record);
+                observed = Observe(lease.Record, emptyAliasIntent || newEmptyAliasIntent);
             }
         }
         if (status == "already-at-value" && !Safety.ObservationConfirms(lease.Record.TargetKind, wanted, observed)) status = "observation-unconfirmed";
         if (attempted && Safety.ObservationConfirms(lease.Record.TargetKind, wanted, observed))
             status = apiSucceeded == true ? command == "apply" ? "applied" : "restored" : "value-confirmed-api-error";
-        if (attempted && observed.State == wanted && lease.Record.TargetKind == Targets.UsbMicrophone
+        if (attempted && observed.State == wanted && lease.Record.TargetKind != Targets.Pnp
             && !Safety.ObservationConfirms(lease.Record.TargetKind, wanted, observed)) status = "raw-confirmed-sources-stale";
+        if (status == "raw-confirmed-sources-stale" && lease.Record.TargetKind == Targets.BluetoothClassic
+            && observed.SynchronizedState == "mixed") status = "waiting-for-reconnect";
         var entry = Event(lease, command, "completed", status, attempted, apiSucceeded, observed: observed,
-            reason: failure is null ? null : ErrorCode(failure), exception: failure, notificationCount: writer?.NotificationCount);
+            reason: status == "waiting-for-reconnect" ? status : failure is null ? null : ErrorCode(failure), exception: failure, notificationCount: writer?.NotificationCount);
         string? eventToken = null;
         try { eventToken = Store.AppendEvent(entry); }
         catch (Exception error) { status = "result-log-failed"; failure = error; }
         return LocationResult(lease, command, status, attempted, apiSucceeded, observed, failure, eventToken, writer?.NotificationCount);
     }
 
-    private Observation Observe(OperationRecord record)
+    private Observation Observe(OperationRecord record, bool emptyAliasIntent = false)
     {
         try
         {
@@ -291,7 +330,7 @@ public sealed partial class NamingService
             if (live.Candidates.Count != 1) return new("unavailable", "target-ambiguous");
             var current = live.Unique();
             Safety.MatchIdentity(record, Store.Machine, current.Identity);
-            return Safety.Classify(record, current);
+            return Safety.Classify(record, current, emptyAliasIntent);
         }
         catch (Exception error) { return new("unavailable", ErrorCode(error), NativeError: NativeError(error)); }
     }
@@ -309,51 +348,77 @@ public sealed partial class NamingService
         bool? apiSucceeded, Observation observation, Exception? failure, string? eventToken, int? notifications = null)
         => new(lease.Token, LocationId(lease.Record), command, status, attempted, apiSucceeded, observation.State,
             observation.ResolvedState, observation.SynchronizedState, observation.Snapshot?.SystemName,
-            failure is null ? observation.Reason : ErrorCode(failure), failure is null ? observation.NativeError : NativeError(failure),
+            status == "waiting-for-reconnect" ? status : failure is null ? observation.Reason : ErrorCode(failure),
+            failure is null ? observation.NativeError : NativeError(failure),
             notifications, eventToken);
 
     private static NamingResult Result(NamingLocationResult[] locations)
         => new(locations.All(item => item.Succeeded) ? "complete" : locations.Any(item => item.Succeeded) ? "partial" : "incomplete", locations);
     private static NamingPreviewEntry Entry(OperationRecord record, NamingLocationKind kind)
         => new(LocationId(record), kind, record.OriginalResolvedName, record.ProposedName,
-            record.ProposedName + Targets.ResolvedSuffix(record), record.TargetKind == Targets.Mouse
-                ? "SetupDiSetDeviceProperty/FriendlyName" : "IPolicyConfig.SetPropertyValue/DeviceDesc/build22631", Evidence(kind));
+            record.ProposedName + Targets.ResolvedSuffix(record), record.TargetKind switch
+            {
+                Targets.Pnp => "SetupDiSetDeviceProperty/FriendlyName",
+                Targets.BluetoothClassic => "BluetoothUpdateDeviceRecord/local alias",
+                _ => "IPolicyConfig.SetPropertyValue/DeviceDesc"
+            }, Evidence(kind));
     private static string LocationId(OperationRecord record)
-        => record.TargetKind == Targets.Mouse ? "pnp:" + record.Target.InstanceId : "audio:" + record.Target.InstanceId[@"SWD\MMDEVAPI\".Length..];
+        => Targets.IsAudio(record.TargetKind) ? "audio:" + record.Target.EndpointId
+            : (record.TargetKind == Targets.Pnp ? "pnp:" : "bluetooth:") + record.Target.InstanceId;
     private static string DisplayEditable(string kind, NativeSnapshot current)
-        => kind == Targets.UsbMicrophone ? Format.Text(current.FriendlyName, Format.RegistryString)! : current.SystemName;
+        => Targets.IsAudio(kind) ? Format.Text(current.FriendlyName, Format.RegistryString)! : current.SystemName;
     private static RawValue Clone(RawValue value) => new(value.Exists, value.Type, value.Bytes.ToArray());
-    private static string PnpId(string id) => id.StartsWith("{0.0.", StringComparison.Ordinal) ? @"SWD\MMDEVAPI\" + id : id;
     private static string? Kind(NamingLocation location) => location.Kind switch
     {
-        NamingLocationKind.Pnp when Format.IsCandidateId(location.TargetId) => Targets.Mouse,
-        NamingLocationKind.AudioRecording => Targets.UsbMicrophone,
+        NamingLocationKind.Pnp => Targets.Pnp,
+        NamingLocationKind.AudioPlayback => Targets.AudioPlayback,
+        NamingLocationKind.AudioRecording => Targets.AudioRecording,
+        NamingLocationKind.BluetoothClassic => Targets.BluetoothClassic,
         _ => null
+    };
+    private static NamingLocationKind LocationKind(string kind) => kind switch
+    {
+        Targets.Pnp => NamingLocationKind.Pnp,
+        Targets.AudioPlayback => NamingLocationKind.AudioPlayback,
+        Targets.AudioRecording => NamingLocationKind.AudioRecording,
+        Targets.BluetoothClassic => NamingLocationKind.BluetoothClassic,
+        _ => throw new ProbeException("invalid-target-kind")
     };
     private static NativeSnapshot Select(TargetSession live, NamingLocation location)
     {
-        var matches = live.Candidates.Where(item => string.Equals(item.Identity.InstanceId, PnpId(location.TargetId), StringComparison.OrdinalIgnoreCase)).ToArray();
-        return matches.Length == 1 ? matches[0] : throw new ProbeException(matches.Length == 0 ? "validated-target-unavailable" : "target-ambiguous");
+        var matches = live.Candidates.Where(item => location.Kind is NamingLocationKind.AudioPlayback or NamingLocationKind.AudioRecording
+            ? string.Equals(item.Identity.EndpointId, location.TargetId, StringComparison.Ordinal)
+            : string.Equals(item.Identity.InstanceId, location.TargetId, StringComparison.OrdinalIgnoreCase)).ToArray();
+        return matches.Length == 1 ? matches[0] : throw new ProbeException(matches.Length == 0 ? "target-offline" : "target-ambiguous");
     }
     private static void MatchSelection(DeviceSnapshot device, NamingLocation location, NativeSnapshot current)
     {
-        if (!device.IsPresent || !location.IsPresent) throw new ProbeException("target-offline");
-        if (!string.Equals(PnpId(location.TargetId), current.Identity.InstanceId, StringComparison.OrdinalIgnoreCase)
-            || (location.Kind == NamingLocationKind.Pnp && !device.Functions.Any(function => function.IsPresent && string.Equals(function.InstanceId, current.Identity.InstanceId, StringComparison.OrdinalIgnoreCase)))
-            || !string.Equals(device.ContainerId, current.Identity.ContainerId, StringComparison.OrdinalIgnoreCase)) throw new ProbeException("selection-identity-changed");
+        var audio = location.Kind is NamingLocationKind.AudioPlayback or NamingLocationKind.AudioRecording;
+        if (!device.IsPresent || (!audio && !location.IsPresent)) throw new ProbeException("target-offline");
+        if (audio)
+        {
+            if (!string.Equals(location.TargetId, current.Identity.EndpointId, StringComparison.Ordinal))
+                throw new ProbeException("selection-identity-changed");
+        }
+        else if (!device.Functions.Any(function => function.IsPresent
+            && string.Equals(function.InstanceId, current.Identity.InstanceId, StringComparison.OrdinalIgnoreCase)
+            && function.ClassGuid == current.Identity.ClassGuid
+            && function.HardwareIds.Order(StringComparer.OrdinalIgnoreCase).SequenceEqual(
+                current.Identity.HardwareIds.Order(StringComparer.OrdinalIgnoreCase), StringComparer.OrdinalIgnoreCase)))
+            throw new ProbeException("selection-identity-changed");
+        if (!string.Equals(device.ContainerId, audio ? current.Identity.EndpointContainerId : current.Identity.ContainerId, StringComparison.OrdinalIgnoreCase))
+            throw new ProbeException("selection-identity-changed");
     }
     private static string Evidence(NamingLocationKind kind) => kind switch
     {
-        NamingLocationKind.Pnp => "Logitech VID046D PIDC547 Mouse; build22631; exit/reconnect/reboot/restore verified; other devices unverified",
-        NamingLocationKind.AudioRecording => "AB13X capture VID001F PID0B21; build22631; internal policy/readback/UI/restore verified; new-backend reconnect/reboot unverified",
-        NamingLocationKind.AudioPlayback => "Core Audio basic properties are documented read-only; playback write/UI/persistence unverified",
-        NamingLocationKind.BluetoothClassic => "BluetoothUpdateDeviceRecord is a public candidate; modern Settings/reconnect/restore unverified",
-        _ => "BLE runtime/persistent/PnP synchronization and complete reversible flow unverified"
+        NamingLocationKind.Pnp => "Windows device-instance FriendlyName; exact instance selection and original-property recovery",
+        NamingLocationKind.AudioRecording or NamingLocationKind.AudioPlayback => "Audio endpoint DeviceDesc; native policy interface with independent Core Audio readback",
+        NamingLocationKind.BluetoothClassic => "Classic Bluetooth local alias; public device-record update and original-alias recovery",
+        _ => "BLE naming is planned for the next version"
     };
     private static void RequireBuild()
     {
-        if (!OperatingSystem.IsWindows() || !Environment.Is64BitProcess || Runtime.WindowsVersion.Build != 22631)
-            throw new ProbeException("validated-build-required");
+        if (!Runtime.IsSupportedWindows) throw new ProbeException("platform-unsupported");
     }
     private static void RequireAdministrator()
     {

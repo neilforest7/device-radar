@@ -5,51 +5,118 @@ namespace DeviceRadar.Naming.Native;
 // Read-only independent resolution. Basic endpoint IPropertyStore values are not a supported application write API.
 internal static class CoreAudio
 {
-    internal sealed record Capture(string Id, string Name, string Description, string InterfaceName, string ContainerId, bool DefaultForAllRoles);
-    public static Capture[] ActiveCaptures()
+    internal sealed record Endpoint(string Id, int Flow, uint State, string PnpInstanceId,
+        string Name, RawValue Description, string InterfaceName, string ContainerId);
+    internal sealed record EnvironmentSnapshot(uint State, string?[] Defaults);
+
+    // The connected topology device exposes the actual PnP instance ID; the endpoint ID stays opaque.
+    internal static Endpoint Open(string endpointId, int flow)
     {
+        if (!Runtime.IsSupportedWindows) throw new ProbeException("audio-platform-unsupported");
+        if (string.IsNullOrWhiteSpace(endpointId) || endpointId.Length > 4096 || endpointId.Any(char.IsControl))
+            throw new ProbeException("invalid-audio-endpoint-id");
+        if (flow is not (0 or 1)) throw new ProbeException("invalid-audio-flow");
         var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
-        IMMDeviceCollection? collection = null;
+        IMMDevice? endpoint = null;
+        IPropertyStore? properties = null;
         try
         {
-            Check(enumerator.EnumAudioEndpoints(1 /* capture */, 1 /* active */, out collection));
-            Check(collection.GetCount(out var count));
-            if (count > 256) throw new ProbeException("audio-endpoint-count-limit");
-            var defaults = new List<string>();
-            for (var role = 0; role < 3; role++)
-            {
-                Check(enumerator.GetDefaultAudioEndpoint(1, role, out var endpoint));
-                try { Check(endpoint.GetId(out var id)); defaults.Add(id); }
-                finally { Marshal.ReleaseComObject(endpoint); }
-            }
-            var results = new List<Capture>();
-            for (uint index = 0; index < count; index++)
-            {
-                Check(collection.Item(index, out var endpoint));
-                IPropertyStore? properties = null;
-                try
-                {
-                    Check(endpoint.GetId(out var id));
-                    Check(endpoint.OpenPropertyStore(0 /* STGM_READ */, out properties));
-                    var name = ReadString(properties, Native.FriendlyName);
-                    var description = ReadString(properties, Native.DeviceDescription);
-                    var interfaceName = ReadString(properties, Native.InterfaceFriendlyName);
-                    var container = ReadGuid(properties, Native.ContainerId);
-                    results.Add(new(id, name, description, interfaceName, container, defaults.All(item => string.Equals(item, id, StringComparison.OrdinalIgnoreCase))));
-                }
-                finally
-                {
-                    if (properties is not null) Marshal.ReleaseComObject(properties);
-                    Marshal.ReleaseComObject(endpoint);
-                }
-            }
-            return results.ToArray();
+            Check(enumerator.GetDevice(endpointId, out endpoint));
+            Check(endpoint.GetId(out var actualId));
+            if (!string.Equals(endpointId, actualId, StringComparison.Ordinal))
+                throw new ProbeException("audio-endpoint-id-mismatch");
+            Check(((IMMEndpoint)endpoint).GetDataFlow(out var actualFlow));
+            if (actualFlow != flow) throw new ProbeException("audio-flow-mismatch");
+            Check(endpoint.GetState(out var state));
+            if (state is not (1 or 2)) throw new ProbeException("audio-endpoint-unavailable");
+            Check(endpoint.OpenPropertyStore(0, out properties));
+            var description = ReadDescription(properties);
+            var name = ReadString(properties, Native.FriendlyName);
+            var interfaceName = ReadString(properties, Native.InterfaceFriendlyName);
+            var containerId = ReadGuid(properties, Native.ContainerId);
+            var pnpId = ConnectedPnpId(endpoint, enumerator);
+            return new(actualId, actualFlow, state, pnpId, name, description, interfaceName, containerId);
         }
         finally
         {
-            if (collection is not null) Marshal.ReleaseComObject(collection);
+            if (properties is not null) Marshal.ReleaseComObject(properties);
+            if (endpoint is not null) Marshal.ReleaseComObject(endpoint);
             Marshal.ReleaseComObject(enumerator);
         }
+    }
+
+    private static string ConnectedPnpId(IMMDevice endpoint, IMMDeviceEnumerator enumerator)
+    {
+        var iid = typeof(IDeviceTopology).GUID;
+        IDeviceTopology? topology = null;
+        IConnector? connector = null;
+        IMMDevice? connected = null;
+        IPropertyStore? properties = null;
+        try
+        {
+            Check(endpoint.Activate(ref iid, 23, IntPtr.Zero, out var instance));
+            topology = (IDeviceTopology)instance;
+            Check(topology.GetConnectorCount(out var count));
+            if (count != 1) throw new ProbeException("audio-topology-ambiguous");
+            Check(topology.GetConnector(0, out connector));
+            Check(connector.GetDeviceIdConnectedTo(out var connectedId));
+            Check(enumerator.GetDevice(connectedId, out connected));
+            Check(connected.OpenPropertyStore(0, out properties));
+            var key = new Native.PropertyKey(new("78c34fc8-104a-4aca-9ea4-524d52996e57"), 256);
+            return ReadString(properties, key);
+        }
+        finally
+        {
+            if (properties is not null) Marshal.ReleaseComObject(properties);
+            if (connected is not null) Marshal.ReleaseComObject(connected);
+            if (connector is not null) Marshal.ReleaseComObject(connector);
+            if (topology is not null) Marshal.ReleaseComObject(topology);
+        }
+    }
+
+    internal static EnvironmentSnapshot ObserveEnvironment(string endpointId)
+    {
+        var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
+        IMMDevice? endpoint = null;
+        try
+        {
+            Check(enumerator.GetDevice(endpointId, out endpoint));
+            Check(endpoint.GetState(out var state));
+            var defaults = new string?[6];
+            for (var flow = 0; flow < 2; flow++)
+            for (var role = 0; role < 3; role++)
+            {
+                var hr = enumerator.GetDefaultAudioEndpoint(flow, role, out var item);
+                if (hr == unchecked((int)0x80070490)) continue; // E_NOTFOUND
+                Check(hr);
+                try { Check(item.GetId(out defaults[flow * 3 + role])); }
+                finally { Marshal.ReleaseComObject(item); }
+            }
+            return new(state, defaults);
+        }
+        finally
+        {
+            if (endpoint is not null) Marshal.ReleaseComObject(endpoint);
+            Marshal.ReleaseComObject(enumerator);
+        }
+    }
+
+    internal static bool SameEnvironment(EnvironmentSnapshot a, EnvironmentSnapshot b)
+        => a.State == b.State && a.Defaults.SequenceEqual(b.Defaults, StringComparer.Ordinal);
+
+    private static RawValue ReadDescription(IPropertyStore store)
+    {
+        var key = Native.DeviceDescription;
+        Check(store.GetValue(ref key, out var value));
+        try
+        {
+            if (value.Type == 0) return RawValue.Missing();
+            if (value.Type != 31 || value.Pointer == IntPtr.Zero) throw new ProbeException("audio-description-type-unsupported");
+            var text = Marshal.PtrToStringUni(value.Pointer) ?? throw new ProbeException("audio-description-unavailable");
+            if (text.Length > 4095) throw new ProbeException("audio-description-size-limit");
+            return new(true, Format.RegistryString, Format.Unicode.GetBytes(text + "\0"));
+        }
+        finally { _ = PropVariantClear(ref value); }
     }
 
     // Observe the system's notifications; this never broadcasts or manufactures a property change.
@@ -102,7 +169,7 @@ internal static class CoreAudio
         public int OnDefaultDeviceChanged(int flow, int role, string? id) => 0;
         public int OnPropertyValueChanged(string id, Native.PropertyKey key)
         {
-            if (string.Equals(id, endpointId, StringComparison.OrdinalIgnoreCase)
+            if (string.Equals(id, endpointId, StringComparison.Ordinal)
                 && key.FormatId == Native.DeviceDescription.FormatId && key.PropertyId is 2 or 14)
                 Interlocked.Increment(ref count);
             return 0;
@@ -128,7 +195,9 @@ internal static class CoreAudio
         try
         {
             if (value.Type != 72 || value.Pointer == IntPtr.Zero) throw new ProbeException("audio-container-unavailable");
-            return Marshal.PtrToStructure<Guid>(value.Pointer).ToString("D");
+            var guid = Marshal.PtrToStructure<Guid>(value.Pointer);
+            if (guid == Guid.Empty) throw new ProbeException("audio-container-unavailable");
+            return guid.ToString("D");
         }
         finally { _ = PropVariantClear(ref value); }
     }
@@ -177,6 +246,26 @@ internal static class CoreAudio
         [PreserveSig] int OpenPropertyStore(uint access, out IPropertyStore properties);
         [PreserveSig] int GetId([MarshalAs(UnmanagedType.LPWStr)] out string id);
         [PreserveSig] int GetState(out uint state);
+    }
+    [ComImport, Guid("1BE09788-6894-4089-8586-9A2A6C265AC5"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IMMEndpoint { [PreserveSig] int GetDataFlow(out int flow); }
+    [ComImport, Guid("2A07407E-6497-4A18-9787-32F79BD0D98F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IDeviceTopology
+    {
+        [PreserveSig] int GetConnectorCount(out uint count);
+        [PreserveSig] int GetConnector(uint index, out IConnector connector);
+    }
+    [ComImport, Guid("9C2C4058-23F5-41DE-877A-DF3AF236A09E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IConnector
+    {
+        [PreserveSig] int GetType(out int type);
+        [PreserveSig] int GetDataFlow(out int flow);
+        [PreserveSig] int ConnectTo(IntPtr connector);
+        [PreserveSig] int Disconnect();
+        [PreserveSig] int IsConnected(out int connected);
+        [PreserveSig] int GetConnectedTo(out IntPtr connector);
+        [PreserveSig] int GetConnectorIdConnectedTo(out IntPtr id);
+        [PreserveSig] int GetDeviceIdConnectedTo([MarshalAs(UnmanagedType.LPWStr)] out string id);
     }
     [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     private interface IPropertyStore
